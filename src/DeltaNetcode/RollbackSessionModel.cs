@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 
 namespace Delta.Netcode;
 
+/// <summary>Runs fixed-step simulation with bounded state history for command rollback.</summary>
 public sealed class RollbackSessionModel : ISessionModel
 {
     private readonly ISimulation _simulation;
@@ -13,6 +14,10 @@ public sealed class RollbackSessionModel : ISessionModel
     private long? _dirtyStep;
     private long _currentStep;
 
+    /// <summary>Creates a rollback model and captures the initial simulation state.</summary>
+    /// <param name="simulation">The application-owned deterministic simulation.</param>
+    /// <param name="initialStep">The first step the model may simulate.</param>
+    /// <param name="historyDepth">The number of rollback steps to retain; must be positive.</param>
     public RollbackSessionModel(ISimulation simulation, long initialStep, int historyDepth)
     {
         _simulation = simulation ?? throw new ArgumentNullException(nameof(simulation));
@@ -23,12 +28,15 @@ public sealed class RollbackSessionModel : ISessionModel
         _snapshots.Add(initialStep, SaveSimulation());
     }
 
+    /// <inheritdoc />
     public bool TrySchedule(ref long simulationStep)
         => simulationStep >= GetFirstRetainedStep();
 
+    /// <inheritdoc />
     public bool CanCancel(in CommandHeader header)
         => header.Step >= GetFirstRetainedStep();
 
+    /// <inheritdoc />
     public void SetCommand(CommandEntry command)
     {
         Guard.ThrowIfNull(command, nameof(command));
@@ -48,11 +56,13 @@ public sealed class RollbackSessionModel : ISessionModel
         }
     }
 
+    /// <inheritdoc />
     public void Remove(CommandKey key)
     {
         RemoveFromStep(key);
     }
 
+    /// <inheritdoc />
     public void Tick(long simulationStep)
     {
         if (_dirtyStep is long dirtyStep)
@@ -68,6 +78,7 @@ public sealed class RollbackSessionModel : ISessionModel
         }
     }
 
+    /// <inheritdoc />
     public void Save(IBufferWriter<byte> output)
     {
         Guard.ThrowIfNull(output, nameof(output));
@@ -77,6 +88,9 @@ public sealed class RollbackSessionModel : ISessionModel
         _simulation.Save(output);
     }
 
+    /// <summary>Writes the oldest retained rollback baseline.</summary>
+    /// <param name="output">The destination buffer writer.</param>
+    /// <returns>The last completed simulation step included in the baseline.</returns>
     public long SaveReplayAnchor(IBufferWriter<byte> output)
     {
         Guard.ThrowIfNull(output, nameof(output));
@@ -98,6 +112,7 @@ public sealed class RollbackSessionModel : ISessionModel
         return completedStep;
     }
 
+    /// <inheritdoc />
     public void Load(ReadOnlySpan<byte> state)
     {
         if (state.Length < sizeof(long))

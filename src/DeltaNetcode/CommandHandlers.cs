@@ -2,33 +2,62 @@ using System.Buffers;
 
 namespace Delta.Netcode;
 
+/// <summary>Serializes and deserializes application-defined command payloads.</summary>
 public interface ICommandPayloadHandler
 {
+    /// <summary>Serializes a command payload into the supplied buffer.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="payload">The payload value to serialize.</param>
+    /// <param name="output">The destination buffer writer.</param>
     void Write<T>(in T payload, IBufferWriter<byte> output);
 
+    /// <summary>Deserializes a command payload from its encoded bytes.</summary>
+    /// <typeparam name="T">The expected command payload type.</typeparam>
+    /// <param name="payload">The encoded payload bytes.</param>
+    /// <returns>The decoded payload value.</returns>
     T Read<T>(ReadOnlySpan<byte> payload);
 }
 
+/// <summary>Validates commands with a shared rule independent of command type.</summary>
 public interface ICommandValidator
 {
+    /// <summary>Returns whether a command satisfies this validation rule.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="command">The command and its session header.</param>
+    /// <returns><see langword="true"/> when the command is valid.</returns>
     bool Validate<T>(in Command<T> command);
 }
 
+/// <summary>Validates commands of one payload type.</summary>
+/// <typeparam name="T">The command payload type.</typeparam>
 public interface ICommandValidator<T>
 {
+    /// <summary>Returns whether a command satisfies this validation rule.</summary>
+    /// <param name="command">The command and its session header.</param>
+    /// <returns><see langword="true"/> when the command is valid.</returns>
     bool Validate(in Command<T> command);
 }
 
+/// <summary>Mutates a command payload before an authority accepts and records it.</summary>
+/// <typeparam name="T">The command payload type.</typeparam>
 public interface ICommandMutator<T>
 {
+    /// <summary>Applies deterministic authoritative changes to a command payload.</summary>
+    /// <param name="payload">The payload being changed.</param>
+    /// <param name="preparation">The transactional ID and seed allocator for this command.</param>
     void Mutate(ref T payload, CommandPreparation preparation);
 }
 
+/// <summary>Executes an accepted command during its scheduled simulation step.</summary>
+/// <typeparam name="T">The command payload type.</typeparam>
 public interface ICommandExecutor<T>
 {
+    /// <summary>Applies the accepted command to application-owned simulation state.</summary>
+    /// <param name="command">The accepted command and authoritative header.</param>
     void Execute(in Command<T> command);
 }
 
+/// <summary>Allocates deterministic IDs and seeds for a command being prepared by authority.</summary>
 public sealed class CommandPreparation
 {
     private ulong _nextId;

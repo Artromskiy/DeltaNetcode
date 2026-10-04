@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 
 namespace Delta.Netcode;
 
+/// <summary>Encodes and decodes command and snapshot wire frames.</summary>
 public static class CommandProtocol
 {
     private const int CommandHeaderSize = 40;
@@ -14,9 +15,17 @@ public static class CommandProtocol
     private const byte OutcomeKind = 3;
     private const byte SnapshotKind = 4;
 
+    /// <summary>Encodes a client command proposal.</summary>
+    /// <param name="header">The proposal header.</param>
+    /// <param name="payload">The serialized command payload.</param>
+    /// <returns>A newly allocated proposal frame.</returns>
     public static byte[] EncodeProposal(in CommandHeader header, ReadOnlySpan<byte> payload)
         => EncodeCommand(ProposalKind, header, payload);
 
+    /// <summary>Encodes an authoritative command outcome.</summary>
+    /// <param name="outcome">The decision and authoritative command header.</param>
+    /// <param name="finalPayload">The final payload bytes for an accepted command; otherwise empty.</param>
+    /// <returns>A newly allocated outcome frame.</returns>
     public static byte[] EncodeOutcome(in CommandOutcome outcome, ReadOnlySpan<byte> finalPayload)
     {
         byte[] message = new byte[CommandPrefixSize + 1 + finalPayload.Length];
@@ -27,6 +36,9 @@ public static class CommandProtocol
         return message;
     }
 
+    /// <summary>Encodes a cancellation request for a command key.</summary>
+    /// <param name="key">The command key to cancel.</param>
+    /// <returns>A newly allocated cancellation frame.</returns>
     public static byte[] EncodeCancel(CommandKey key)
     {
         byte[] message = new byte[CancelMessageSize];
@@ -38,6 +50,8 @@ public static class CommandProtocol
     /// <summary>
     /// Writes a session snapshot frame to the supplied buffer writer.
     /// </summary>
+    /// <param name="snapshot">The snapshot to encode.</param>
+    /// <param name="output">The destination buffer writer.</param>
     public static void WriteSnapshot(SessionSnapshot snapshot, IBufferWriter<byte> output)
     {
         Guard.ThrowIfNull(snapshot, nameof(snapshot));
@@ -61,6 +75,9 @@ public static class CommandProtocol
     /// <summary>
     /// Reads a session snapshot frame and copies its model state into an owned snapshot.
     /// </summary>
+    /// <param name="message">The encoded message to inspect.</param>
+    /// <param name="snapshot">Receives the decoded snapshot when the frame is valid.</param>
+    /// <returns><see langword="true"/> if the message is a valid snapshot frame.</returns>
     public static bool TryReadSnapshot(ReadOnlySpan<byte> message, out SessionSnapshot? snapshot)
     {
         if (message.Length < SnapshotHeaderSize || message[0] != SnapshotKind)
@@ -92,6 +109,11 @@ public static class CommandProtocol
         return true;
     }
 
+    /// <summary>Reads a proposal header and borrows its serialized payload from a message.</summary>
+    /// <param name="message">The encoded message to inspect.</param>
+    /// <param name="header">Receives the decoded command header.</param>
+    /// <param name="payload">Receives the payload slice within <paramref name="message"/>.</param>
+    /// <returns><see langword="true"/> if the message has a valid proposal frame prefix.</returns>
     public static bool TryReadCommand(ReadOnlySpan<byte> message, out CommandHeader header, out ReadOnlySpan<byte> payload)
     {
         if (message.Length < CommandPrefixSize || message[0] != ProposalKind)
@@ -106,6 +128,11 @@ public static class CommandProtocol
         return true;
     }
 
+    /// <summary>Reads an authoritative outcome and borrows its final payload from a message.</summary>
+    /// <param name="message">The encoded message to inspect.</param>
+    /// <param name="outcome">Receives the decoded outcome.</param>
+    /// <param name="finalPayload">Receives the final payload slice within <paramref name="message"/>.</param>
+    /// <returns><see langword="true"/> if the message contains a valid outcome frame.</returns>
     public static bool TryReadOutcome(
         ReadOnlySpan<byte> message,
         out CommandOutcome outcome,
@@ -132,6 +159,10 @@ public static class CommandProtocol
         return true;
     }
 
+    /// <summary>Reads a cancellation request.</summary>
+    /// <param name="message">The encoded message to inspect.</param>
+    /// <param name="key">Receives the cancelled command key.</param>
+    /// <returns><see langword="true"/> if the message is a valid cancellation frame.</returns>
     public static bool TryReadCancel(ReadOnlySpan<byte> message, out CommandKey key)
     {
         if (message.Length != CancelMessageSize || message[0] != CancelKind)

@@ -2,20 +2,46 @@ using System.Buffers;
 
 namespace Delta.Netcode;
 
+/// <summary>Controls command registration, submission, simulation and replay for one session.</summary>
 public interface ISession
 {
+    /// <summary>Gets the last simulation step applied by this session.</summary>
+    long CurrentStep { get; }
+
+    /// <summary>Registers a command payload type and its stable ID.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="id">The non-zero stable command ID.</param>
     void Register<T>(ulong id);
 
+    /// <summary>Registers a validator that applies to every command type.</summary>
+    /// <param name="validator">The common command validator.</param>
     void Register(ICommandValidator validator);
 
+    /// <summary>Registers a validator for one command payload type.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="validator">The typed validator.</param>
     void Register<T>(ICommandValidator<T> validator);
 
+    /// <summary>Registers a mutator for one command payload type.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="mutator">The typed command mutator.</param>
     void Register<T>(ICommandMutator<T> mutator);
 
+    /// <summary>Registers an executor for one command payload type.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="executor">The typed command executor.</param>
     void Register<T>(ICommandExecutor<T> executor);
 
+    /// <summary>Creates and submits a command for a simulation step.</summary>
+    /// <typeparam name="T">The command payload type.</typeparam>
+    /// <param name="payload">The command payload, serialized during this call.</param>
+    /// <param name="simulationStep">The requested simulation step.</param>
+    /// <returns>The stable key assigned to the command.</returns>
     CommandKey Send<T>(in T payload, long simulationStep);
 
+    /// <summary>Requests cancellation of a command authored by this session host.</summary>
+    /// <param name="key">The command key to cancel.</param>
+    /// <returns>The cancellation outcome.</returns>
     CommandResult Cancel(CommandKey key);
 
     /// <summary>Attaches a transport connection used to send session messages.</summary>
@@ -33,6 +59,8 @@ public interface ISession
     /// <returns>The applied outcome, or a failure result if it is incompatible with this session.</returns>
     CommandOutcome ApplyOutcome(in CommandOutcome outcome, ReadOnlySpan<byte> finalPayload);
 
+    /// <summary>Advances the session model through the specified simulation step.</summary>
+    /// <param name="simulationStep">The last simulation step to apply.</param>
     void Tick(long simulationStep);
 
     /// <summary>
@@ -44,8 +72,22 @@ public interface ISession
     /// Restores this session from a compatible snapshot and discards prior command history.
     /// </summary>
     void Restore(SessionSnapshot snapshot);
+
+    /// <summary>Dispatches a command type ID to a visitor without exposing the command registry.</summary>
+    /// <typeparam name="TVisitor">The visitor type to dispatch.</typeparam>
+    /// <param name="typeId">The registered command type ID.</param>
+    /// <param name="visitor">The visitor that handles the registered command type.</param>
+    /// <exception cref="KeyNotFoundException">The command type ID is not registered.</exception>
+    void VisitCommandType<TVisitor>(ulong typeId, ref TVisitor visitor)
+        where TVisitor : ICommandVisitor;
+
+    /// <summary>Reads accepted, non-cancelled command records after a snapshot cursor.</summary>
+    /// <param name="cursor">The snapshot cursor that defines which accepted records have already been applied.</param>
+    /// <returns>Accepted records after the cursor, in deterministic simulation order.</returns>
+    IEnumerable<JournalRecord> ReadAcceptedAfter(CommandCursor cursor);
 }
 
+/// <summary>Owns command registration, authority state, journal and simulation model for one session.</summary>
 public sealed class SessionHost : ISession
 {
     private readonly Dictionary<Type, ICommandPolicy> _policies = [];
@@ -62,6 +104,16 @@ public sealed class SessionHost : ISession
     private long _currentStep;
     private CommandCursor? _snapshotCursor;
 
+    /// <summary>Creates a session host with its command, payload, model and journal dependencies.</summary>
+    /// <param name="start">The session identity and initial deterministic state.</param>
+    /// <param name="commands">The command registry used for type and ID lookup.</param>
+    /// <param name="payloadHandler">The application codec for typed command payloads.</param>
+    /// <param name="model">The session model that schedules and applies commands.</param>
+    /// <param name="journal">The command history store.</param>
+    /// <param name="firstSequence">The first command sequence assigned by this host.</param>
+    /// <param name="transport">The optional transport used to send session messages.</param>
+    /// <param name="mode">The local, client or server authority mode.</param>
+    /// <param name="preparationState">The initial deterministic ID and seed state.</param>
     public SessionHost(
         SessionStart start,
         ICommandRegistry commands,
@@ -89,17 +141,24 @@ public sealed class SessionHost : ISession
         _preparation = new CommandPreparation(preparationState ?? new CommandPreparationState(1, start.Seed));
     }
 
+    /// <summary>Gets the immutable initial configuration of this session.</summary>
     public SessionStart Start { get; }
 
+    /// <summary>Gets the authority mode of this session.</summary>
     public SessionMode Mode { get; }
+
+    /// <summary>Gets the last simulation step applied by this session.</summary>
+    public long CurrentStep => _currentStep;
 
     /// <summary>Attaches a transport connection used to send session messages.</summary>
     /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <inheritdoc />
     public void AttachConnection(ulong connectionId) => _connections.Add(connectionId);
 
     /// <summary>Detaches a previously attached transport connection.</summary>
     /// <param name="connectionId">The transport-specific connection identifier.</param>
     /// <returns><see langword="true"/> if the connection was attached.</returns>
+    /// <inheritdoc />
     public bool DetachConnection(ulong connectionId) => _connections.Remove(connectionId);
 
     internal void AttachTransport(ITransport transport)
@@ -108,6 +167,7 @@ public sealed class SessionHost : ISession
         _transport = transport;
     }
 
+    /// <inheritdoc />
     public void Register(ICommandValidator validator)
     {
         Guard.ThrowIfNull(validator, nameof(validator));
@@ -115,17 +175,21 @@ public sealed class SessionHost : ISession
         _validators.Add(validator);
     }
 
+    /// <inheritdoc />
     public void Register<T>(ulong id)
     {
         RegisterCommandType<T>(id);
     }
 
+    /// <inheritdoc />
     public void Register<T>(ICommandValidator<T> validator)
         => GetOrCreatePolicy<T>().Register(validator);
 
+    /// <inheritdoc />
     public void Register<T>(ICommandMutator<T> mutator)
         => GetOrCreatePolicy<T>().Register(mutator);
 
+    /// <inheritdoc />
     public void Register<T>(ICommandExecutor<T> executor)
         => GetOrCreatePolicy<T>().Register(executor);
 
@@ -173,6 +237,7 @@ public sealed class SessionHost : ISession
         return policy;
     }
 
+    /// <inheritdoc />
     public CommandKey Send<T>(in T payload, long simulationStep)
     {
         ulong typeId = _commands.GetId<T>();
@@ -203,6 +268,11 @@ public sealed class SessionHost : ISession
         return key;
     }
 
+    /// <summary>Validates and records a proposal received from an authenticated author.</summary>
+    /// <param name="authenticatedAuthor">The author established by the connection binding.</param>
+    /// <param name="proposal">The client-supplied command header.</param>
+    /// <param name="requestPayload">The serialized command payload.</param>
+    /// <returns>The authoritative result for the proposal.</returns>
     public CommandOutcome Receive(AuthorId authenticatedAuthor, in CommandHeader proposal, ReadOnlySpan<byte> requestPayload)
     {
         if (Mode != SessionMode.Server)
@@ -246,8 +316,13 @@ public sealed class SessionHost : ISession
         return visitor.Outcome;
     }
 
+    /// <inheritdoc />
     public CommandResult Cancel(CommandKey key) => Cancel(Start.AuthorId, key);
 
+    /// <summary>Requests cancellation on behalf of a specified author.</summary>
+    /// <param name="requester">The authenticated author making the request.</param>
+    /// <param name="key">The command key to cancel.</param>
+    /// <returns>The cancellation outcome.</returns>
     public CommandResult Cancel(AuthorId requester, CommandKey key)
     {
         if (key.SessionId != Start.SessionId)
@@ -295,6 +370,7 @@ public sealed class SessionHost : ISession
     /// <param name="outcome">The server outcome to apply.</param>
     /// <param name="finalPayload">The accepted command payload, or an empty span for non-accepted outcomes.</param>
     /// <returns>The applied outcome, or a failure result if it is incompatible with this session.</returns>
+    /// <inheritdoc />
     public CommandOutcome ApplyOutcome(in CommandOutcome outcome, ReadOnlySpan<byte> finalPayload)
     {
         if (outcome.Header.Key.SessionId != Start.SessionId)
@@ -377,6 +453,7 @@ public sealed class SessionHost : ISession
         return outcome;
     }
 
+    /// <inheritdoc />
     public void Tick(long simulationStep)
     {
         if (simulationStep < _currentStep)
@@ -391,6 +468,7 @@ public sealed class SessionHost : ISession
     /// <summary>
     /// Captures a replayable session baseline and the command preparation state.
     /// </summary>
+    /// <returns>A snapshot containing session identity, replay cursor, preparation state and model bytes.</returns>
     public SessionSnapshot CaptureSnapshot()
     {
         _model.Tick(_currentStep);
@@ -403,6 +481,8 @@ public sealed class SessionHost : ISession
     /// <summary>
     /// Restores this session from a compatible snapshot and discards prior command history.
     /// </summary>
+    /// <param name="snapshot">The snapshot to restore.</param>
+    /// <exception cref="ArgumentException">The snapshot belongs to another session or protocol.</exception>
     public void Restore(SessionSnapshot snapshot)
     {
         Guard.ThrowIfNull(snapshot, nameof(snapshot));
@@ -423,6 +503,23 @@ public sealed class SessionHost : ISession
         _nextOrder = checked(snapshot.Cursor.Order + 1);
         _preparation.Restore(snapshot.Preparation);
     }
+
+    /// <summary>Dispatches a registered command type ID to a visitor.</summary>
+    /// <typeparam name="TVisitor">The visitor type to dispatch.</typeparam>
+    /// <param name="typeId">The registered command type ID.</param>
+    /// <param name="visitor">The visitor that handles the registered command type.</param>
+    /// <exception cref="KeyNotFoundException">The command type ID is not registered.</exception>
+    /// <inheritdoc />
+    public void VisitCommandType<TVisitor>(ulong typeId, ref TVisitor visitor)
+        where TVisitor : ICommandVisitor
+        => _commands.Visit(typeId, ref visitor);
+
+    /// <summary>Reads accepted, non-cancelled command records after a snapshot cursor.</summary>
+    /// <param name="cursor">The snapshot cursor that defines which accepted records have already been applied.</param>
+    /// <returns>Accepted records after the cursor, in deterministic simulation order.</returns>
+    /// <inheritdoc />
+    public IEnumerable<JournalRecord> ReadAcceptedAfter(CommandCursor cursor)
+        => _journal.ReadAcceptedAfter(cursor);
 
     private byte[] Serialize<T>(in T payload)
     {
@@ -594,10 +691,17 @@ public sealed class SessionHost : ISession
     }
 }
 
+/// <summary>Hosts sessions and binds authenticated transport connections to their authors.</summary>
 public interface ISessionServer
 {
+    /// <summary>Adds a session to the server's lookup table.</summary>
+    /// <param name="session">The session to host.</param>
     void Add(SessionHost session);
 
+    /// <summary>Looks up a session by its numeric session ID.</summary>
+    /// <param name="sessionId">The session ID to find.</param>
+    /// <param name="session">Receives the session when found; otherwise <see langword="null"/>.</param>
+    /// <returns><see langword="true"/> if the session exists.</returns>
     bool TryGet(ulong sessionId, out SessionHost? session);
 
     /// <summary>Binds an authenticated connection to a session and author.</summary>
@@ -611,19 +715,29 @@ public interface ISessionServer
     /// <returns><see langword="true"/> if a binding was removed.</returns>
     bool Unbind(ulong connectionId);
 
+    /// <summary>Removes a session and unbinds its connected clients.</summary>
+    /// <param name="sessionId">The ID of the session to remove.</param>
     void Remove(ulong sessionId);
 
+    /// <summary>Processes a framed client message using the author bound to its connection.</summary>
+    /// <param name="connectionId">The authenticated transport connection.</param>
+    /// <param name="message">The encoded proposal or cancellation message.</param>
+    /// <returns>The command result, or <see cref="CommandResult.InvalidMessage"/> for malformed data.</returns>
     CommandResult Receive(ulong connectionId, ReadOnlySpan<byte> message);
 }
 
+/// <summary>Routes authenticated transport connections to authoritative sessions.</summary>
 public sealed class SessionServer : ISessionServer
 {
     private readonly Dictionary<ulong, SessionHost> _sessions = [];
     private readonly Dictionary<ulong, (SessionHost Session, AuthorId Author)> _connections = [];
     private readonly ITransport? _transport;
 
+    /// <summary>Creates a server router with an optional transport for replies and broadcasts.</summary>
+    /// <param name="transport">The transport used to send messages, or <see langword="null"/> for a sendless router.</param>
     public SessionServer(ITransport? transport = null) => _transport = transport;
 
+    /// <inheritdoc />
     public void Add(SessionHost session)
     {
         Guard.ThrowIfNull(session, nameof(session));
@@ -635,6 +749,7 @@ public sealed class SessionServer : ISessionServer
         _sessions.Add(session.Start.SessionId.Value, session);
     }
 
+    /// <inheritdoc />
     public bool TryGet(ulong sessionId, out SessionHost? session)
         => _sessions.TryGetValue(sessionId, out session);
 
@@ -663,6 +778,7 @@ public sealed class SessionServer : ISessionServer
         return true;
     }
 
+    /// <inheritdoc />
     public void Remove(ulong sessionId)
     {
         _sessions.Remove(sessionId);
@@ -681,6 +797,7 @@ public sealed class SessionServer : ISessionServer
         }
     }
 
+    /// <inheritdoc />
     public CommandResult Receive(ulong connectionId, ReadOnlySpan<byte> message)
     {
         if (!_connections.TryGetValue(connectionId, out (SessionHost Session, AuthorId Author) binding))
@@ -712,6 +829,11 @@ public sealed class SessionServer : ISessionServer
         return CommandResult.InvalidMessage;
     }
 
+    /// <summary>Processes an already-decoded command proposal for a bound connection.</summary>
+    /// <param name="connectionId">The authenticated transport connection.</param>
+    /// <param name="header">The client-supplied proposal header.</param>
+    /// <param name="payload">The serialized command payload.</param>
+    /// <returns>The authoritative outcome, or a rejection when the connection is not bound.</returns>
     public CommandOutcome Receive(ulong connectionId, in CommandHeader header, ReadOnlySpan<byte> payload)
     {
         if (!_connections.TryGetValue(connectionId, out (SessionHost Session, AuthorId Author) binding))

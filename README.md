@@ -46,7 +46,10 @@ namespace, nested type names, and generic arity.
 The application implements `ICommandPayloadHandler`, `ISimulation`, and typed
 command handlers. `RollbackSessionModel` owns the fixed step history and calls
 each `CommandEntry.Execute()` before the matching simulation tick. Callers own
-the clock and invoke `ISession.Tick(step)` for discrete steps.
+the clock and invoke `ISession.Tick(step)` for discrete steps. `CurrentStep`
+reports the last applied step. `VisitCommandType<TVisitor>` dispatches a
+registered ID to a class or struct visitor; `ReadAcceptedAfter(cursor)` reads
+accepted replay records without exposing the journal.
 
 `SessionHost.Send<T>` obtains the registered ID, session author and sequence.
 In `SessionMode.Local` and `SessionMode.Server`, it runs validation, scheduling
@@ -116,7 +119,7 @@ var snapshotBytes = new ArrayBufferWriter<byte>();
 CommandProtocol.WriteSnapshot(snapshot, snapshotBytes);
 
 // Send the snapshot frame, then replay these records on the restored client.
-foreach (JournalRecord record in journal.ReadAcceptedAfter(snapshot.Cursor))
+foreach (JournalRecord record in authority.ReadAcceptedAfter(snapshot.Cursor))
 {
     var outcome = new CommandOutcome(record.Result, record.Header);
     client.ApplyOutcome(outcome, record.FinalPayload.Span);
@@ -137,11 +140,11 @@ state and command preparation state; applications choose where to persist or
 how to transport it. `CommandProtocol` frames snapshots but does not compress
 or fragment them.
 
-## Projects
+## Packages and examples
 
-- `src/DeltaNetcode` — runtime contracts and implementation.
-- `src/DeltaNetcode.Generators` — command catalog generator and ID analyzer.
-- `src/DeltaNetcode.CodeFixes` — analyzer code fix for pinning IDs.
-- `WORKFLOW.md` — build and repository checks.
-- `samples/DeltaNetcode.Maze` — small consumer game model.
-- `tests/DeltaNetcode.Consumer.Tests` — local, client-server and multi-client session scenarios.
+The DeltaNetcode NuGet package targets .NET Standard 2.1 and .NET 10 with its
+runtime, generator, analyzer and code fix. The [Maze sample](samples/DeltaNetcode.Maze) shows consumer usage.
+
+## Further reading
+
+- [Public API guide](docs/API.md)
