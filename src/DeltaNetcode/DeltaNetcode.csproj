@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>DeltaNetcode</AssemblyName>
     <PackageId>DeltaNetcode</PackageId>
-    <Version>0.0.3</Version>
+    <Version>0.0.4</Version>
     <Description>Engine-independent networking for .NET applications.</Description>
     <PackageTags>networking;netcode;high-performance</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
