@@ -18,22 +18,49 @@ public interface ISession
 
     CommandResult Cancel(CommandKey key);
 
+    /// <summary>Attaches a transport connection used to send session messages.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    void AttachConnection(ulong connectionId);
+
+    /// <summary>Detaches a previously attached transport connection.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <returns><see langword="true"/> if the connection was attached.</returns>
+    bool DetachConnection(ulong connectionId);
+
+    /// <summary>Applies an authoritative command outcome and updates predicted state.</summary>
+    /// <param name="outcome">The server outcome to apply.</param>
+    /// <param name="finalPayload">The accepted command payload, or an empty span for non-accepted outcomes.</param>
+    /// <returns>The applied outcome, or a failure result if it is incompatible with this session.</returns>
+    CommandOutcome ApplyOutcome(in CommandOutcome outcome, ReadOnlySpan<byte> finalPayload);
+
     void Tick(long simulationStep);
+
+    /// <summary>
+    /// Captures a replayable session baseline and the command preparation state.
+    /// </summary>
+    SessionSnapshot CaptureSnapshot();
+
+    /// <summary>
+    /// Restores this session from a compatible snapshot and discards prior command history.
+    /// </summary>
+    void Restore(SessionSnapshot snapshot);
 }
 
 public sealed class SessionHost : ISession
 {
     private readonly Dictionary<Type, ICommandPolicy> _policies = [];
-    private readonly Dictionary<long, uint> _ordersByStep = [];
     private readonly List<ICommandValidator> _validators = [];
     private readonly ICommandRegistry _commands;
     private readonly ICommandPayloadHandler _payloadHandler;
     private readonly ICommandJournal _journal;
     private readonly ISessionModel _model;
     private readonly CommandPreparation _preparation;
-    private readonly ITransport? _transport;
+    private ITransport? _transport;
     private readonly HashSet<ulong> _connections = [];
     private ulong _nextSequence;
+    private uint _nextOrder = 1;
+    private long _currentStep;
+    private CommandCursor? _snapshotCursor;
 
     public SessionHost(
         SessionStart start,
@@ -43,7 +70,8 @@ public sealed class SessionHost : ISession
         ICommandJournal journal,
         ulong firstSequence = 0,
         ITransport? transport = null,
-        SessionMode mode = SessionMode.Local)
+        SessionMode mode = SessionMode.Local,
+        CommandPreparationState? preparationState = null)
     {
         Start = start;
         Guard.ThrowIfNull(commands, nameof(commands));
@@ -57,16 +85,28 @@ public sealed class SessionHost : ISession
         _transport = transport;
         Mode = mode;
         _nextSequence = firstSequence;
-        _preparation = new CommandPreparation(1, start.Seed);
+        _currentStep = checked(start.Step - 1);
+        _preparation = new CommandPreparation(preparationState ?? new CommandPreparationState(1, start.Seed));
     }
 
     public SessionStart Start { get; }
 
     public SessionMode Mode { get; }
 
+    /// <summary>Attaches a transport connection used to send session messages.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
     public void AttachConnection(ulong connectionId) => _connections.Add(connectionId);
 
+    /// <summary>Detaches a previously attached transport connection.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <returns><see langword="true"/> if the connection was attached.</returns>
     public bool DetachConnection(ulong connectionId) => _connections.Remove(connectionId);
+
+    internal void AttachTransport(ITransport transport)
+    {
+        Guard.ThrowIfNull(transport, nameof(transport));
+        _transport = transport;
+    }
 
     public void Register(ICommandValidator validator)
     {
@@ -137,21 +177,39 @@ public sealed class SessionHost : ISession
     {
         ulong typeId = _commands.GetId<T>();
         var key = new CommandKey(Start.SessionId, Start.AuthorId, checked(_nextSequence++));
-        var header = new CommandHeader(key, typeId, simulationStep, GetNextOrder(simulationStep));
         byte[] bytes = Serialize(payload);
-        if (Mode != SessionMode.Client || IsPredicted(typeId))
+        if (Mode == SessionMode.Client)
         {
-            var record = new JournalRecord(header, CommandResult.Accepted, bytes, bytes);
-            _journal.Append(record);
-            _model.SetCommand(GetPolicy<T>().CreateEntry(header, bytes, _payloadHandler));
+            var header = new CommandHeader(key, typeId, simulationStep, GetNextOrder());
+            if (IsPredicted(typeId))
+            {
+                var record = new JournalRecord(header, CommandResult.Accepted, bytes, bytes);
+                _journal.Append(record);
+                _model.SetCommand(GetPolicy<T>().CreateEntry(header, bytes, _payloadHandler));
+            }
+
+            Broadcast(CommandProtocol.EncodeProposal(header, bytes));
+            return key;
         }
 
-        Broadcast(CommandProtocol.EncodeProposal(header, bytes));
+        var requestHeader = new CommandHeader(key, typeId, simulationStep, 0);
+        CommandOutcome outcome = Accept(requestHeader, requestHeader, bytes, payload);
+        if (Mode == SessionMode.Server && outcome.Result == CommandResult.Accepted
+            && _journal.TryGet(key, out JournalRecord? accepted))
+        {
+            Broadcast(CommandProtocol.EncodeOutcome(outcome, accepted!.FinalPayload.Span));
+        }
+
         return key;
     }
 
     public CommandOutcome Receive(AuthorId authenticatedAuthor, in CommandHeader proposal, ReadOnlySpan<byte> requestPayload)
     {
+        if (Mode != SessionMode.Server)
+        {
+            return new CommandOutcome(CommandResult.Rejected, proposal);
+        }
+
         if (proposal.Key.SessionId != Start.SessionId)
         {
             return new CommandOutcome(CommandResult.InvalidMessage, proposal);
@@ -233,6 +291,10 @@ public sealed class SessionHost : ISession
         return CommandResult.Cancelled;
     }
 
+    /// <summary>Applies an authoritative command outcome and updates predicted state.</summary>
+    /// <param name="outcome">The server outcome to apply.</param>
+    /// <param name="finalPayload">The accepted command payload, or an empty span for non-accepted outcomes.</param>
+    /// <returns>The applied outcome, or a failure result if it is incompatible with this session.</returns>
     public CommandOutcome ApplyOutcome(in CommandOutcome outcome, ReadOnlySpan<byte> finalPayload)
     {
         if (outcome.Header.Key.SessionId != Start.SessionId)
@@ -240,9 +302,24 @@ public sealed class SessionHost : ISession
             return new CommandOutcome(CommandResult.InvalidMessage, outcome.Header);
         }
 
+        if (_snapshotCursor is CommandCursor cursor
+            && outcome.Header.Step <= cursor.Step
+            && outcome.Header.Order <= cursor.Order)
+        {
+            return outcome;
+        }
+
         if (_journal.TryGet(outcome.Header.Key, out JournalRecord? previous) && previous!.IsCancelled)
         {
             return new CommandOutcome(CommandResult.Cancelled, previous.Header);
+        }
+
+        if (previous is not null
+            && previous.Result == outcome.Result
+            && previous.Header == outcome.Header
+            && previous.FinalPayload.Span.SequenceEqual(finalPayload))
+        {
+            return outcome;
         }
 
         if (outcome.Result == CommandResult.Accepted)
@@ -272,6 +349,7 @@ public sealed class SessionHost : ISession
             }
 
             _model.SetCommand(visitor.Entry ?? throw new InvalidOperationException("Registered command did not create an execution entry."));
+            ObserveOrder(outcome.Header.Order);
         }
         else
         {
@@ -301,7 +379,49 @@ public sealed class SessionHost : ISession
 
     public void Tick(long simulationStep)
     {
+        if (simulationStep < _currentStep)
+        {
+            throw new ArgumentOutOfRangeException(nameof(simulationStep), "Session steps must not move backwards.");
+        }
+
         _model.Tick(simulationStep);
+        _currentStep = simulationStep;
+    }
+
+    /// <summary>
+    /// Captures a replayable session baseline and the command preparation state.
+    /// </summary>
+    public SessionSnapshot CaptureSnapshot()
+    {
+        _model.Tick(_currentStep);
+        var writer = new ArrayBufferWriter<byte>();
+        long snapshotStep = _model.SaveReplayAnchor(writer);
+        var cursor = new CommandCursor(snapshotStep, _nextOrder - 1);
+        return new SessionSnapshot(Start.SessionId, Start.ProtocolId, snapshotStep, cursor, _preparation.Capture(), writer.WrittenSpan);
+    }
+
+    /// <summary>
+    /// Restores this session from a compatible snapshot and discards prior command history.
+    /// </summary>
+    public void Restore(SessionSnapshot snapshot)
+    {
+        Guard.ThrowIfNull(snapshot, nameof(snapshot));
+        if (snapshot.SessionId != Start.SessionId)
+        {
+            throw new ArgumentException("Snapshot session ID does not match this session.", nameof(snapshot));
+        }
+
+        if (snapshot.ProtocolId != Start.ProtocolId)
+        {
+            throw new ArgumentException("Snapshot protocol ID does not match this session.", nameof(snapshot));
+        }
+
+        _model.Load(snapshot.ModelState.Span);
+        _journal.Clear();
+        _currentStep = snapshot.Step;
+        _snapshotCursor = snapshot.Cursor;
+        _nextOrder = checked(snapshot.Cursor.Order + 1);
+        _preparation.Restore(snapshot.Preparation);
     }
 
     private byte[] Serialize<T>(in T payload)
@@ -311,11 +431,19 @@ public sealed class SessionHost : ISession
         return writer.WrittenSpan.ToArray();
     }
 
-    private uint GetNextOrder(long step)
+    private uint GetNextOrder()
     {
-        _ordersByStep.TryGetValue(step, out uint order);
-        _ordersByStep[step] = checked(order + 1);
+        uint order = _nextOrder;
+        _nextOrder = checked(_nextOrder + 1);
         return order;
+    }
+
+    private void ObserveOrder(uint order)
+    {
+        if (order >= _nextOrder)
+        {
+            _nextOrder = checked(order + 1);
+        }
     }
 
     internal bool TryGetJournalRecord(CommandKey key, out JournalRecord? record) => _journal.TryGet(key, out record);
@@ -348,6 +476,11 @@ public sealed class SessionHost : ISession
             return new CommandOutcome(CommandResult.InvalidMessage, header);
         }
 
+        return Accept(header, requestHeader, requestPayload, payload);
+    }
+
+    private CommandOutcome Accept<T>(CommandHeader header, CommandHeader requestHeader, ReadOnlySpan<byte> requestPayload, T payload)
+    {
         ICommandPolicy<T> policy = GetPolicy<T>();
         var request = new Command<T>(header, payload);
         if (!ValidateCommon(in request) || !policy.Validate(in request))
@@ -364,14 +497,15 @@ public sealed class SessionHost : ISession
             return new CommandOutcome(CommandResult.Rejected, rejected);
         }
 
-        header = new CommandHeader(header.Key, header.TypeId, step, GetNextOrder(step));
+        header = new CommandHeader(header.Key, header.TypeId, step, GetNextOrder());
         CommandPreparation temporary = _preparation.Fork();
         policy.Mutate(ref payload, temporary);
         byte[] finalPayload = Serialize(payload);
+        CommandEntry entry = policy.CreateEntry(header, finalPayload, _payloadHandler);
         var record = new JournalRecord(header, CommandResult.Accepted, requestPayload, finalPayload, requestHeader);
         _journal.Append(record);
         _preparation.Restore(temporary.Capture());
-        _model.SetCommand(policy.CreateEntry(header, finalPayload, _payloadHandler));
+        _model.SetCommand(entry);
         return new CommandOutcome(CommandResult.Accepted, header);
     }
 
@@ -466,6 +600,17 @@ public interface ISessionServer
 
     bool TryGet(ulong sessionId, out SessionHost? session);
 
+    /// <summary>Binds an authenticated connection to a session and author.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <param name="session">The session the connection will join.</param>
+    /// <param name="author">The author assigned by the server after authentication.</param>
+    void Bind(ulong connectionId, SessionHost session, AuthorId author);
+
+    /// <summary>Removes a connection binding and detaches it from its session.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <returns><see langword="true"/> if a binding was removed.</returns>
+    bool Unbind(ulong connectionId);
+
     void Remove(ulong sessionId);
 
     CommandResult Receive(ulong connectionId, ReadOnlySpan<byte> message);
@@ -482,12 +627,21 @@ public sealed class SessionServer : ISessionServer
     public void Add(SessionHost session)
     {
         Guard.ThrowIfNull(session, nameof(session));
+        if (_transport is not null && session.Mode == SessionMode.Server)
+        {
+            session.AttachTransport(_transport);
+        }
+
         _sessions.Add(session.Start.SessionId.Value, session);
     }
 
     public bool TryGet(ulong sessionId, out SessionHost? session)
         => _sessions.TryGetValue(sessionId, out session);
 
+    /// <summary>Binds an authenticated connection to a session and author.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <param name="session">The session the connection will join.</param>
+    /// <param name="author">The author assigned by the server after authentication.</param>
     public void Bind(ulong connectionId, SessionHost session, AuthorId author)
     {
         Guard.ThrowIfNull(session, nameof(session));
@@ -495,6 +649,9 @@ public sealed class SessionServer : ISessionServer
         session.AttachConnection(connectionId);
     }
 
+    /// <summary>Removes a connection binding and detaches it from its session.</summary>
+    /// <param name="connectionId">The transport-specific connection identifier.</param>
+    /// <returns><see langword="true"/> if a binding was removed.</returns>
     public bool Unbind(ulong connectionId)
     {
         if (!_connections.Remove(connectionId, out (SessionHost Session, AuthorId Author) binding))

@@ -10,6 +10,20 @@ public interface ICommandJournal
 
     void Cancel(CommandKey key);
 
+    /// <summary>
+    /// Returns accepted, non-cancelled records after a snapshot boundary, in simulation order.
+    /// </summary>
+    /// <remarks>
+    /// Records later than <paramref name="cursor"/> are those at a later step or with a higher
+    /// authoritative session order. This includes future commands already accepted at capture time
+    /// and commands accepted later inside the rollback window.
+    /// </remarks>
+    IEnumerable<JournalRecord> ReadAcceptedAfter(CommandCursor cursor);
+
+    /// <summary>
+    /// Removes all records from the journal.
+    /// </summary>
+    void Clear();
 }
 
 public sealed class JournalRecord
@@ -78,6 +92,48 @@ public sealed class MemoryCommandJournal : ICommandJournal
         var tombstoneHeader = new CommandHeader(key, 0, long.MinValue, 0);
         _records.Add(key, new JournalRecord(tombstoneHeader, CommandResult.Cancelled, [], []) { IsCancelled = true });
     }
+
+    public IEnumerable<JournalRecord> ReadAcceptedAfter(CommandCursor cursor)
+    {
+        var records = new List<JournalRecord>();
+        foreach (JournalRecord record in _records.Values)
+        {
+            if (record.Result != CommandResult.Accepted || record.IsCancelled)
+            {
+                continue;
+            }
+
+            // Orders are session-wide and monotonic. Step also includes accepted future work
+            // that was already in the journal when a snapshot was captured.
+            if (record.Header.Step > cursor.Step || record.Header.Order > cursor.Order)
+            {
+                records.Add(record);
+            }
+        }
+
+        records.Sort(static (left, right) =>
+        {
+            int stepComparison = left.Header.Step.CompareTo(right.Header.Step);
+            if (stepComparison != 0)
+            {
+                return stepComparison;
+            }
+
+            int orderComparison = left.Header.Order.CompareTo(right.Header.Order);
+            if (orderComparison != 0)
+            {
+                return orderComparison;
+            }
+
+            int authorComparison = left.Header.Key.AuthorId.Value.CompareTo(right.Header.Key.AuthorId.Value);
+            return authorComparison != 0
+                ? authorComparison
+                : left.Header.Key.Sequence.CompareTo(right.Header.Key.Sequence);
+        });
+        return records;
+    }
+
+    public void Clear() => _records.Clear();
 }
 
 public interface ITransport
@@ -107,6 +163,12 @@ public interface ISessionModel
     void Tick(long simulationStep);
 
     void Save(System.Buffers.IBufferWriter<byte> output);
+
+    /// <summary>
+    /// Writes a replayable baseline and returns the last completed step represented by it.
+    /// Commands after that step can be replayed against the baseline.
+    /// </summary>
+    long SaveReplayAnchor(System.Buffers.IBufferWriter<byte> output);
 
     void Load(ReadOnlySpan<byte> state);
 }

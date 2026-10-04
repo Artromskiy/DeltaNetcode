@@ -20,13 +20,14 @@ public sealed class RollbackSessionModel : ISessionModel
 
         _currentStep = checked(initialStep - 1);
         _historyDepth = historyDepth;
+        _snapshots.Add(initialStep, SaveSimulation());
     }
 
     public bool TrySchedule(ref long simulationStep)
-        => simulationStep >= _currentStep - _historyDepth + 1;
+        => simulationStep >= GetFirstRetainedStep();
 
     public bool CanCancel(in CommandHeader header)
-        => header.Step >= _currentStep - _historyDepth + 1;
+        => header.Step >= GetFirstRetainedStep();
 
     public void SetCommand(CommandEntry command)
     {
@@ -76,6 +77,27 @@ public sealed class RollbackSessionModel : ISessionModel
         _simulation.Save(output);
     }
 
+    public long SaveReplayAnchor(IBufferWriter<byte> output)
+    {
+        Guard.ThrowIfNull(output, nameof(output));
+
+        using SortedDictionary<long, byte[]>.Enumerator enumerator = _snapshots.GetEnumerator();
+        if (!enumerator.MoveNext())
+        {
+            throw new InvalidOperationException("The session model has no retained rollback state.");
+        }
+
+        long firstReplayStep = enumerator.Current.Key;
+        long completedStep = checked(firstReplayStep - 1);
+        Span<byte> stepBytes = output.GetSpan(sizeof(long));
+        BinaryPrimitives.WriteInt64LittleEndian(stepBytes, completedStep);
+        output.Advance(sizeof(long));
+        ReadOnlySpan<byte> simulationState = enumerator.Current.Value;
+        simulationState.CopyTo(output.GetSpan(simulationState.Length));
+        output.Advance(simulationState.Length);
+        return completedStep;
+    }
+
     public void Load(ReadOnlySpan<byte> state)
     {
         if (state.Length < sizeof(long))
@@ -88,6 +110,7 @@ public sealed class RollbackSessionModel : ISessionModel
         _commandsByStep.Clear();
         _commandsByKey.Clear();
         _snapshots.Clear();
+        _snapshots.Add(checked(_currentStep + 1), SaveSimulation());
         _dirtyStep = null;
     }
 
@@ -184,5 +207,13 @@ public sealed class RollbackSessionModel : ISessionModel
         {
             _dirtyStep = _dirtyStep is null ? existing.Header.Step : Math.Min(_dirtyStep.Value, existing.Header.Step);
         }
+    }
+
+    private long GetFirstRetainedStep()
+    {
+        using SortedDictionary<long, byte[]>.Enumerator enumerator = _snapshots.GetEnumerator();
+        return enumerator.MoveNext()
+            ? enumerator.Current.Key
+            : checked(_currentStep + 1);
     }
 }

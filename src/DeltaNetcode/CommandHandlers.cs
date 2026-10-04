@@ -34,14 +34,51 @@ public sealed class CommandPreparation
     private ulong _nextId;
     private ulong _randomState;
 
-    public CommandPreparation(ulong nextId, ulong seed)
+    /// <summary>
+    /// Creates command preparation from previously captured state.
+    /// </summary>
+    public CommandPreparation(CommandPreparationState state)
     {
-        _nextId = nextId;
-        _randomState = seed;
+        _nextId = state.NextId;
+        _randomState = state.RandomState;
     }
 
-    public ulong NextId() => _nextId++;
+    /// <summary>
+    /// Creates command preparation from the first identifier and random seed.
+    /// </summary>
+    public CommandPreparation(ulong nextId, ulong seed)
+        : this(new CommandPreparationState(nextId, seed))
+    {
+    }
 
+    /// <summary>
+    /// Returns the next identifier and advances the allocator by one.
+    /// </summary>
+    public ulong NextId()
+    {
+        ulong id = _nextId;
+        _nextId = checked(_nextId + 1);
+        return id;
+    }
+
+    /// <summary>
+    /// Reserves a contiguous range and returns its first identifier.
+    /// </summary>
+    public ulong ReserveIds(uint count)
+    {
+        if (count == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), "At least one ID must be reserved.");
+        }
+
+        ulong firstId = _nextId;
+        _nextId = checked(_nextId + count);
+        return firstId;
+    }
+
+    /// <summary>
+    /// Returns the next deterministic seed.
+    /// </summary>
     public ulong NextSeed()
     {
         _randomState += 0x9E3779B97F4A7C15UL;
@@ -51,15 +88,17 @@ public sealed class CommandPreparation
         return value ^ (value >> 31);
     }
 
-    internal (ulong NextId, ulong RandomState) Capture() => (_nextId, _randomState);
+    /// <summary>
+    /// Captures the allocator and random state.
+    /// </summary>
+    public CommandPreparationState Capture() => new(_nextId, _randomState);
 
     internal CommandPreparation Fork()
     {
-        var copy = new CommandPreparation(_nextId, _randomState);
-        return copy;
+        return new CommandPreparation(Capture());
     }
 
-    internal void Restore((ulong NextId, ulong RandomState) state)
+    internal void Restore(CommandPreparationState state)
     {
         _nextId = state.NextId;
         _randomState = state.RandomState;

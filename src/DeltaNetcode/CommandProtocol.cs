@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 
 namespace Delta.Netcode;
@@ -7,9 +8,11 @@ public static class CommandProtocol
     private const int CommandHeaderSize = 40;
     private const int CommandPrefixSize = 1 + CommandHeaderSize;
     private const int CancelMessageSize = 21;
+    private const int SnapshotHeaderSize = 49;
     private const byte ProposalKind = 1;
     private const byte CancelKind = 2;
     private const byte OutcomeKind = 3;
+    private const byte SnapshotKind = 4;
 
     public static byte[] EncodeProposal(in CommandHeader header, ReadOnlySpan<byte> payload)
         => EncodeCommand(ProposalKind, header, payload);
@@ -30,6 +33,63 @@ public static class CommandProtocol
         message[0] = CancelKind;
         WriteKey(message.AsSpan(1), key);
         return message;
+    }
+
+    /// <summary>
+    /// Writes a session snapshot frame to the supplied buffer writer.
+    /// </summary>
+    public static void WriteSnapshot(SessionSnapshot snapshot, IBufferWriter<byte> output)
+    {
+        Guard.ThrowIfNull(snapshot, nameof(snapshot));
+        Guard.ThrowIfNull(output, nameof(output));
+
+        ReadOnlySpan<byte> modelState = snapshot.ModelState.Span;
+        int messageSize = checked(SnapshotHeaderSize + modelState.Length);
+        Span<byte> destination = output.GetSpan(messageSize)[..messageSize];
+        destination[0] = SnapshotKind;
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[1..], snapshot.SessionId.Value);
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[9..], snapshot.ProtocolId.Value);
+        BinaryPrimitives.WriteInt64LittleEndian(destination[17..], snapshot.Step);
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[25..], snapshot.Cursor.Order);
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[29..], snapshot.Preparation.NextId);
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[37..], snapshot.Preparation.RandomState);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[45..], modelState.Length);
+        modelState.CopyTo(destination[SnapshotHeaderSize..]);
+        output.Advance(messageSize);
+    }
+
+    /// <summary>
+    /// Reads a session snapshot frame and copies its model state into an owned snapshot.
+    /// </summary>
+    public static bool TryReadSnapshot(ReadOnlySpan<byte> message, out SessionSnapshot? snapshot)
+    {
+        if (message.Length < SnapshotHeaderSize || message[0] != SnapshotKind)
+        {
+            snapshot = null;
+            return false;
+        }
+
+        int modelStateLength = BinaryPrimitives.ReadInt32LittleEndian(message[45..]);
+        if (modelStateLength < 0 || message.Length != SnapshotHeaderSize + modelStateLength)
+        {
+            snapshot = null;
+            return false;
+        }
+
+        ulong sessionId = BinaryPrimitives.ReadUInt64LittleEndian(message[1..]);
+        ulong protocolId = BinaryPrimitives.ReadUInt64LittleEndian(message[9..]);
+        long step = BinaryPrimitives.ReadInt64LittleEndian(message[17..]);
+        uint order = BinaryPrimitives.ReadUInt32LittleEndian(message[25..]);
+        ulong nextId = BinaryPrimitives.ReadUInt64LittleEndian(message[29..]);
+        ulong randomState = BinaryPrimitives.ReadUInt64LittleEndian(message[37..]);
+        snapshot = new SessionSnapshot(
+            new SessionId(sessionId),
+            new ProtocolId(protocolId),
+            step,
+            new CommandCursor(step, order),
+            new CommandPreparationState(nextId, randomState),
+            message[SnapshotHeaderSize..]);
+        return true;
     }
 
     public static bool TryReadCommand(ReadOnlySpan<byte> message, out CommandHeader header, out ReadOnlySpan<byte> payload)

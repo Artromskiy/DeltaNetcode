@@ -48,17 +48,18 @@ command handlers. `RollbackSessionModel` owns the fixed step history and calls
 each `CommandEntry.Execute()` before the matching simulation tick. Callers own
 the clock and invoke `ISession.Tick(step)` for discrete steps.
 
-`SessionHost.Send<T>` obtains the registered ID, assigns the session author and
-sequence, and sends a proposal through the configured `ITransport`. A host in
-`SessionMode.Client` immediately schedules commands registered with
-`[NetCommand(Predicted = true)]` in its local model. Accepted server outcomes
-replace the prediction with the authoritative payload; rejected outcomes
-remove it and roll back the model. Other client commands wait for the server
-outcome before entering local simulation. `SessionMode.Local` applies sent
-commands directly. `SessionServer.Bind` attaches an authenticated connection
-to a session and author. Feed transport messages to `SessionServer.Receive`;
-route outcomes through `CommandProtocol.TryReadOutcome` and
-`SessionHost.ApplyOutcome`.
+`SessionHost.Send<T>` obtains the registered ID, session author and sequence.
+In `SessionMode.Local` and `SessionMode.Server`, it runs validation, scheduling
+and mutation before adding the final payload to the model. Server sessions
+broadcast the authoritative outcome. In `SessionMode.Client`, it sends a
+proposal through `ITransport`; commands marked with
+`[NetCommand(Predicted = true)]` are also scheduled in the local model. Accepted
+server outcomes replace predictions with the authoritative payload; rejected
+outcomes remove them and roll back the model. Other client commands wait for
+the server outcome before entering local simulation. `SessionServer.Bind`
+attaches an authenticated connection to a session and author. Feed transport
+messages to `SessionServer.Receive`; route outcomes through
+`CommandProtocol.TryReadOutcome` and `SessionHost.ApplyOutcome`.
 
 `SessionHost.Send` serializes the payload immediately and retains the encoded
 bytes. Mutating a class command after `Send` does not change the queued or
@@ -90,6 +91,38 @@ Mutators receive a transactional `CommandPreparation` for allocating stable
 IDs and seeds; only accepted commands commit its state. Accepted payload bytes
 are owned by the journal and reused during rollback.
 
+`CommandPreparationState` seeds the ID allocator and deterministic seed stream.
+`ReserveIds(count)` allocates a contiguous range. Pass the first free ID from
+the loaded game state when creating the session.
+
+`SessionHost.CaptureSnapshot()` asks the session model for a replayable history
+anchor. With `RollbackSessionModel`, this is the oldest retained rollback state;
+it can precede the model's current step so that late accepted commands remain
+replayable after restoration. `ISessionModel.SaveReplayAnchor` gives custom
+models the same integration point for their own history. `Restore` checks the
+session and protocol IDs, restores the model and command preparation state, and
+clears the old command journal.
+
+The snapshot cursor combines the completed anchor step with the highest
+authoritative session order observed at capture time. The journal returns
+accepted records after the cursor in `(Step, Order)` order. This includes
+future commands accepted before the snapshot and commands accepted later
+within the retained rollback window. During network transfer, queue newly
+arriving outcomes until the snapshot and journal records have been applied.
+
+```csharp
+SessionSnapshot snapshot = authority.CaptureSnapshot();
+var snapshotBytes = new ArrayBufferWriter<byte>();
+CommandProtocol.WriteSnapshot(snapshot, snapshotBytes);
+
+// Send the snapshot frame, then replay these records on the restored client.
+foreach (JournalRecord record in journal.ReadAcceptedAfter(snapshot.Cursor))
+{
+    var outcome = new CommandOutcome(record.Result, record.Header);
+    client.ApplyOutcome(outcome, record.FinalPayload.Span);
+}
+```
+
 ## Transport contract
 
 `CommandProtocol` encodes proposals, cancellations, and outcomes as byte
@@ -99,8 +132,10 @@ The server trusts author identity only from the connection binding; the author
 field inside an incoming message is replaced before processing.
 
 The built-in `MemoryCommandJournal` retains command outcomes and cancellation
-tombstones for the lifetime of the session. Session state persistence beyond
-the simulation/model `Save` and `Load` contracts is not provided yet.
+tombstones for the lifetime of the session. `SessionSnapshot` captures model
+state and command preparation state; applications choose where to persist or
+how to transport it. `CommandProtocol` frames snapshots but does not compress
+or fragment them.
 
 ## Projects
 

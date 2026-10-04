@@ -8,6 +8,23 @@ public readonly record struct AuthorId(uint Value);
 
 public readonly record struct CommandKey(SessionId SessionId, AuthorId AuthorId, ulong Sequence);
 
+/// <summary>
+/// Describes the completed simulation step and highest authoritative command order represented by a snapshot.
+/// </summary>
+/// <param name="Step">The last completed step in the replay anchor.</param>
+/// <param name="Order">The highest authoritative session order observed at capture time.</param>
+public readonly record struct CommandCursor(long Step, uint Order);
+
+/// <summary>
+/// Captures the next entity identifier and random state used when preparing accepted commands.
+/// </summary>
+/// <param name="NextId">The next identifier available to an accepted command mutator.</param>
+/// <param name="RandomState">The current deterministic seed generator state.</param>
+public readonly record struct CommandPreparationState(ulong NextId, ulong RandomState);
+
+/// <summary>
+/// Identifies a command in a session. Order is assigned monotonically by the authoritative session.
+/// </summary>
 public readonly record struct CommandHeader(CommandKey Key, ulong TypeId, long Step, uint Order);
 
 public readonly record struct Command<T>(CommandHeader Header, T Payload);
