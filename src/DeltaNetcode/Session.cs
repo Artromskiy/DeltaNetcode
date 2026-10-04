@@ -271,7 +271,17 @@ public sealed class SessionHost : ISession
 
     private CommandOutcome Receive<T>(CommandHeader header, CommandHeader requestHeader, ReadOnlySpan<byte> requestPayload) where T : struct
     {
-        T payload = _payloadHandler.Read<T>(requestPayload);
+        T payload;
+        try
+        {
+            payload = _payloadHandler.Read<T>(requestPayload);
+        }
+        catch (ArgumentException)
+        {
+            _journal.Append(new JournalRecord(header, CommandResult.InvalidMessage, requestPayload, [], requestHeader));
+            return new CommandOutcome(CommandResult.InvalidMessage, header);
+        }
+
         ICommandPolicy<T> policy = GetPolicy<T>();
         var request = new Command<T>(header, payload);
         if (!ValidateCommon(in request) || !policy.Validate(in request))

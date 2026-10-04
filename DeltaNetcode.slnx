@@ -3,4 +3,6 @@
   <Project Path="src/DeltaNetcode.Generators/DeltaNetcode.Generators.csproj" />
   <Project Path="src/DeltaNetcode.CodeFixes/DeltaNetcode.CodeFixes.csproj" />
   <Project Path="samples/DeltaNetcode.Aot/DeltaNetcode.Aot.csproj" />
+  <Project Path="samples/DeltaNetcode.Maze/DeltaNetcode.Maze.csproj" />
+  <Project Path="tests/DeltaNetcode.Consumer.Tests/DeltaNetcode.Consumer.Tests.csproj" />
 </Solution>
