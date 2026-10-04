@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DeltaNetcode</AssemblyName>
+    <PackageId>DeltaNetcode</PackageId>
+    <Version>0.0.1</Version>
+    <Description>Engine-independent networking for .NET applications.</Description>
+    <PackageTags>networking;netcode;high-performance</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RootNamespace>Delta.Netcode</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildProjectDirectory)/../../README.md"
+          Pack="true"
+          PackagePath="README.md"
+          Visible="false" />
+  </ItemGroup>
+</Project>

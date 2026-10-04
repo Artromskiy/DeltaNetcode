@@ -1,0 +1,48 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Aa]rtifacts/
+!/artifacts/
+!/artifacts/.gitkeep
+/artifacts/*
+!/artifacts/.gitkeep
+[Dd]ebug/
+[Rr]elease/
+publish/
+
+# Test and benchmark output
+[Tt]est[Rr]esults/
+TestResult.xml
+BenchmarkDotNet.Artifacts/
+coverage/
+coverage.*
+
+# IDE and user state
+.vs/
+.idea/
+# Ignore VS Code workspace settings in this repository.
+**/.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# NuGet packages and generated files
+**/packages/
+!docs/packages/
+!docs/packages/*.md
+*.nupkg
+*.snupkg
+*.nuget.props
+*.nuget.targets
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
