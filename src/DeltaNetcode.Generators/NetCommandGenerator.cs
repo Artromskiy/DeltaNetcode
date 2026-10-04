@@ -86,8 +86,9 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
             return;
         }
 
-        var source = new StringBuilder("namespace Delta.Netcode;\n\npublic static class GeneratedCommands\n{\n");
-        source.AppendLine("    private static readonly global::Delta.Netcode.ICommandRegistration[] s_registrations = [");
+        var source = new StringBuilder("namespace Delta.Netcode\n{\npublic static class GeneratedCommands\n{\n");
+        source.AppendLine("    private static readonly global::Delta.Netcode.ICommandRegistration[] s_registrations = new global::Delta.Netcode.ICommandRegistration[]");
+        source.AppendLine("    {");
         foreach ((string typeName, ulong id, bool isPredicted, _) in registrations)
         {
             string idText = id.ToString("X16", CultureInfo.InvariantCulture);
@@ -96,7 +97,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
                 .Append(isPredicted ? "true" : "false").AppendLine("),");
         }
 
-        source.AppendLine("    ];");
+        source.AppendLine("    };");
         source.AppendLine("    public static global::System.ReadOnlySpan<global::Delta.Netcode.ICommandRegistration> Registrations => s_registrations;");
         source.AppendLine("    public static global::Delta.Netcode.ICommandRegistration GetRegistration<T>()");
         source.AppendLine("    {");
@@ -109,6 +110,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
         source.AppendLine("        }");
         source.AppendLine("        throw new global::System.Collections.Generic.KeyNotFoundException($\"No generated net command registration exists for '{typeof(T)}'.\");");
         source.AppendLine("    }");
+        source.AppendLine("}");
         source.AppendLine("}");
         context.AddSource("GeneratedCommands.g.cs", source.ToString());
     }
