@@ -15,9 +15,22 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../DeltaNetcode.Generators/DeltaNetcode.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../DeltaNetcode.CodeFixes/DeltaNetcode.CodeFixes.csproj"
+                      ReferenceOutputAssembly="false" />
     <None Include="$(MSBuildProjectDirectory)/../../README.md"
           Pack="true"
           PackagePath="README.md"
+          Visible="false" />
+    <None Include="../DeltaNetcode.Generators/bin/$(Configuration)/netstandard2.0/DeltaNetcode.Generators.dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
+          Visible="false" />
+    <None Include="../DeltaNetcode.CodeFixes/bin/$(Configuration)/netstandard2.0/DeltaNetcode.CodeFixes.dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
           Visible="false" />
   </ItemGroup>
 </Project>
