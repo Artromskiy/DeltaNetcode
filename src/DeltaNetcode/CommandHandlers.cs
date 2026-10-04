@@ -4,27 +4,27 @@ namespace Delta.Netcode;
 
 public interface ICommandPayloadHandler
 {
-    void Write<T>(in T payload, IBufferWriter<byte> output) where T : struct;
+    void Write<T>(in T payload, IBufferWriter<byte> output);
 
-    T Read<T>(ReadOnlySpan<byte> payload) where T : struct;
+    T Read<T>(ReadOnlySpan<byte> payload);
 }
 
 public interface ICommandValidator
 {
-    bool Validate<T>(in Command<T> command) where T : struct;
+    bool Validate<T>(in Command<T> command);
 }
 
-public interface ICommandValidator<T> where T : struct
+public interface ICommandValidator<T>
 {
     bool Validate(in Command<T> command);
 }
 
-public interface ICommandMutator<T> where T : struct
+public interface ICommandMutator<T>
 {
     void Mutate(ref T payload, CommandPreparation preparation);
 }
 
-public interface ICommandExecutor<T> where T : struct
+public interface ICommandExecutor<T>
 {
     void Execute(in Command<T> command);
 }

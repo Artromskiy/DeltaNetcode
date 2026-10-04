@@ -20,7 +20,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
     private static readonly DiagnosticDescriptor UnsupportedType = new(
         "DNET0004",
         "Net command type cannot be generated",
-        "Net command '{0}' must be a non-generic, non-ref-like struct accessible to generated code",
+        "Net command '{0}' must be a non-abstract, non-generic, non-ref-like class or struct accessible to generated code",
         "DeltaNetcode",
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -29,7 +29,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
     {
         IncrementalValuesProvider<CommandModel> commands = context.SyntaxProvider.ForAttributeWithMetadataName(
             "Delta.Netcode.NetCommandAttribute",
-            static (node, _) => node is StructDeclarationSyntax or RecordDeclarationSyntax,
+            static (node, _) => node is StructDeclarationSyntax or ClassDeclarationSyntax or RecordDeclarationSyntax,
             static (syntax, _) => new CommandModel(
                 (INamedTypeSymbol)syntax.TargetSymbol,
                 syntax.TargetNode.GetLocation()));
@@ -39,12 +39,17 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
 
     private static void Generate(SourceProductionContext context, ImmutableArray<CommandModel> models)
     {
-        var registrations = new List<(string TypeName, ulong Id, Location Location)>();
+        var registrations = new List<(string TypeName, ulong Id, bool IsPredicted, Location Location)>();
         var ids = new Dictionary<ulong, string>();
         foreach (CommandModel model in models)
         {
             INamedTypeSymbol type = model.Type;
-            if (type.TypeKind != TypeKind.Struct || type.IsRefLikeType || type.IsGenericType || !IsAccessible(type))
+            if (type.TypeKind is not (TypeKind.Struct or TypeKind.Class)
+                || type.IsRefLikeType
+                || type.IsGenericType
+                || type.IsStatic
+                || type.IsAbstract
+                || !IsAccessible(type))
             {
                 context.ReportDiagnostic(Diagnostic.Create(UnsupportedType, model.Location, type.ToDisplayString()));
                 continue;
@@ -53,6 +58,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
             AttributeData? attribute = type.GetAttributes().FirstOrDefault(static item =>
                 item.AttributeClass?.ToDisplayString() == "Delta.Netcode.NetCommandAttribute");
             ulong id = ReadId(attribute, out bool hasExplicitId);
+            bool isPredicted = ReadPrediction(attribute);
             if (!hasExplicitId)
             {
                 id = CommandIdHash.Compute(type);
@@ -71,7 +77,7 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
             }
 
             ids.Add(id, typeName);
-            registrations.Add((typeName, id, model.Location));
+            registrations.Add((typeName, id, isPredicted, model.Location));
         }
 
         registrations.Sort(static (left, right) => StringComparer.Ordinal.Compare(left.TypeName, right.TypeName));
@@ -81,25 +87,28 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
         }
 
         var source = new StringBuilder("namespace Delta.Netcode;\n\npublic static class GeneratedCommands\n{\n");
-        foreach ((string typeName, ulong id, _) in registrations)
+        source.AppendLine("    private static readonly global::Delta.Netcode.ICommandRegistration[] s_registrations = [");
+        foreach ((string typeName, ulong id, bool isPredicted, _) in registrations)
         {
             string idText = id.ToString("X16", CultureInfo.InvariantCulture);
-            source.Append("    private static readonly global::Delta.Netcode.ICommandRegistration s_registration_")
-                .Append(idText).Append(" = new global::Delta.Netcode.CommandRegistration<")
-                .Append(typeName).Append(">(0x").Append(idText).AppendLine("UL);");
+            source.Append("        new global::Delta.Netcode.CommandRegistration<")
+                .Append(typeName).Append(">(0x").Append(idText).Append("UL, isPredicted: ")
+                .Append(isPredicted ? "true" : "false").AppendLine("),");
         }
 
-        source.Append("    private static readonly global::Delta.Netcode.ICommandRegistration[] s_registrations = [")
-            .Append(string.Join(", ", registrations.Select(static registration => "s_registration_" + registration.Id.ToString("X16", CultureInfo.InvariantCulture))))
-            .AppendLine("];\n");
+        source.AppendLine("    ];");
         source.AppendLine("    public static global::System.ReadOnlySpan<global::Delta.Netcode.ICommandRegistration> Registrations => s_registrations;");
-        foreach ((_, ulong id, _) in registrations)
-        {
-            string idText = id.ToString("X16", CultureInfo.InvariantCulture);
-            source.Append("    public static global::Delta.Netcode.ICommandRegistration Registration_0x")
-                .Append(idText).Append(" => s_registration_").Append(idText).AppendLine(";");
-        }
-
+        source.AppendLine("    public static global::Delta.Netcode.ICommandRegistration GetRegistration<T>()");
+        source.AppendLine("    {");
+        source.AppendLine("        foreach (global::Delta.Netcode.ICommandRegistration registration in s_registrations)");
+        source.AppendLine("        {");
+        source.AppendLine("            if (registration.CommandType == typeof(T))");
+        source.AppendLine("            {");
+        source.AppendLine("                return registration;");
+        source.AppendLine("            }");
+        source.AppendLine("        }");
+        source.AppendLine("        throw new global::System.Collections.Generic.KeyNotFoundException($\"No generated net command registration exists for '{typeof(T)}'.\");");
+        source.AppendLine("    }");
         source.AppendLine("}");
         context.AddSource("GeneratedCommands.g.cs", source.ToString());
     }
@@ -122,6 +131,24 @@ public sealed class NetCommandGenerator : IIncrementalGenerator
         }
 
         return 0;
+    }
+
+    private static bool ReadPrediction(AttributeData? attribute)
+    {
+        if (attribute is null)
+        {
+            return false;
+        }
+
+        foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
+        {
+            if (argument.Key == "Predicted" && argument.Value.Value is bool isPredicted)
+            {
+                return isPredicted;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsAccessible(INamedTypeSymbol type)

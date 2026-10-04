@@ -10,7 +10,7 @@ public readonly record struct CommandKey(SessionId SessionId, AuthorId AuthorId,
 
 public readonly record struct CommandHeader(CommandKey Key, ulong TypeId, long Step, uint Order);
 
-public readonly record struct Command<T>(CommandHeader Header, T Payload) where T : struct;
+public readonly record struct Command<T>(CommandHeader Header, T Payload);
 
 public readonly record struct SessionStart(
     SessionId SessionId,
@@ -31,20 +31,31 @@ public enum CommandResult : byte
 
 public readonly record struct CommandOutcome(CommandResult Result, CommandHeader Header);
 
-[AttributeUsage(AttributeTargets.Struct, Inherited = false)]
+public enum SessionMode : byte
+{
+    Local,
+    Client,
+    Server
+}
+
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class, Inherited = false)]
 public sealed class NetCommandAttribute : Attribute
 {
     public ulong Id { get; set; }
+
+    public bool Predicted { get; set; }
 }
 
 public interface ICommandVisitor
 {
-    void Visit<T>() where T : struct;
+    void Visit<T>();
 }
 
 public interface ICommandRegistration
 {
     ulong Id { get; }
+
+    bool IsPredicted { get; }
 
     Type CommandType { get; }
 
@@ -53,20 +64,20 @@ public interface ICommandRegistration
 
 public interface ICommandRegistry
 {
-    void Register<T>(ulong id) where T : struct;
+    void Register<T>(ulong id, bool isPredicted = false);
 
     void Register(ICommandRegistration registration);
 
-    ulong GetId<T>() where T : struct;
+    ulong GetId<T>();
 
     bool TryGet(ulong id, out ICommandRegistration? registration);
 
     void Visit<TVisitor>(ulong id, ref TVisitor visitor) where TVisitor : struct, ICommandVisitor;
 }
 
-public sealed class CommandRegistration<T> : ICommandRegistration where T : struct
+public sealed class CommandRegistration<T> : ICommandRegistration
 {
-    public CommandRegistration(ulong id)
+    public CommandRegistration(ulong id, bool isPredicted = false)
     {
         if (id == 0)
         {
@@ -74,9 +85,12 @@ public sealed class CommandRegistration<T> : ICommandRegistration where T : stru
         }
 
         Id = id;
+        IsPredicted = isPredicted;
     }
 
     public ulong Id { get; }
+
+    public bool IsPredicted { get; }
 
     public Type CommandType => typeof(T);
 

@@ -5,8 +5,8 @@ public sealed class CommandRegistry : ICommandRegistry
     private readonly Dictionary<ulong, ICommandRegistration> _registrationsById = [];
     private readonly Dictionary<Type, ICommandRegistration> _registrationsByType = [];
 
-    public void Register<T>(ulong id) where T : struct
-        => Register(new CommandRegistration<T>(id));
+    public void Register<T>(ulong id, bool isPredicted = false)
+        => Register(new CommandRegistration<T>(id, isPredicted));
 
     public void Register(ICommandRegistration registration)
     {
@@ -20,6 +20,11 @@ public sealed class CommandRegistry : ICommandRegistry
         {
             if (byId.CommandType == registration.CommandType)
             {
+                if (byId.IsPredicted != registration.IsPredicted)
+                {
+                    throw new InvalidOperationException($"Command '{registration.CommandType}' is already registered with different prediction metadata.");
+                }
+
                 return;
             }
 
@@ -35,7 +40,7 @@ public sealed class CommandRegistry : ICommandRegistry
         _registrationsByType.Add(registration.CommandType, registration);
     }
 
-    public ulong GetId<T>() where T : struct
+    public ulong GetId<T>()
         => _registrationsByType.TryGetValue(typeof(T), out ICommandRegistration? registration)
             ? registration.Id
             : throw new KeyNotFoundException($"Command type '{typeof(T)}' is not registered.");

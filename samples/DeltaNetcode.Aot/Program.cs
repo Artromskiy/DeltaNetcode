@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Delta.Netcode;
 
@@ -28,7 +29,8 @@ internal static class GeneratedSmoke
             new UnmanagedPayloadHandler(),
             model,
             new MemoryCommandJournal());
-        session.Register<AddScoreCommand>(commands.GetId<AddScoreCommand>(), executor: new AddScoreExecutor(simulation));
+        session.Register<AddScoreCommand>(commands.GetId<AddScoreCommand>());
+        session.Register<AddScoreCommand>(new AddScoreExecutor(simulation));
 
         session.Send(new AddScoreCommand { Amount = 5 }, simulationStep: 0);
         session.Tick(0);
@@ -40,15 +42,28 @@ internal static class GeneratedSmoke
 
     private sealed class UnmanagedPayloadHandler : ICommandPayloadHandler
     {
-        public void Write<T>(in T payload, IBufferWriter<byte> output) where T : struct
+        public void Write<T>(in T payload, IBufferWriter<byte> output)
         {
-            Span<byte> destination = output.GetSpan(Marshal.SizeOf<T>());
-            MemoryMarshal.Write(destination, in payload);
-            output.Advance(Marshal.SizeOf<T>());
+            if (typeof(T) != typeof(AddScoreCommand))
+            {
+                throw new NotSupportedException($"No AOT smoke codec for {typeof(T)}.");
+            }
+
+            Span<byte> destination = output.GetSpan(sizeof(int));
+            BinaryPrimitives.WriteInt32LittleEndian(destination, ((AddScoreCommand)(object)payload).Amount);
+            output.Advance(sizeof(int));
         }
 
-        public T Read<T>(ReadOnlySpan<byte> payload) where T : struct
-            => MemoryMarshal.Read<T>(payload);
+        public T Read<T>(ReadOnlySpan<byte> payload)
+        {
+            if (typeof(T) != typeof(AddScoreCommand) || payload.Length != sizeof(int))
+            {
+                throw new ArgumentException("AOT smoke payload must be a four-byte AddScoreCommand.", nameof(payload));
+            }
+
+            int amount = BinaryPrimitives.ReadInt32LittleEndian(payload);
+            return (T)(object)new AddScoreCommand { Amount = amount };
+        }
     }
 
     private sealed class ScoreSimulation : ISimulation

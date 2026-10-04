@@ -4,7 +4,17 @@ namespace Delta.Netcode;
 
 public interface ISession
 {
-    CommandKey Send<T>(in T payload, long simulationStep) where T : struct;
+    void Register<T>(ulong id);
+
+    void Register(ICommandValidator validator);
+
+    void Register<T>(ICommandValidator<T> validator);
+
+    void Register<T>(ICommandMutator<T> mutator);
+
+    void Register<T>(ICommandExecutor<T> executor);
+
+    CommandKey Send<T>(in T payload, long simulationStep);
 
     CommandResult Cancel(CommandKey key);
 
@@ -32,7 +42,8 @@ public sealed class SessionHost : ISession
         ISessionModel model,
         ICommandJournal journal,
         ulong firstSequence = 0,
-        ITransport? transport = null)
+        ITransport? transport = null,
+        SessionMode mode = SessionMode.Local)
     {
         Start = start;
         Guard.ThrowIfNull(commands, nameof(commands));
@@ -44,42 +55,97 @@ public sealed class SessionHost : ISession
         _model = model;
         _journal = journal;
         _transport = transport;
+        Mode = mode;
         _nextSequence = firstSequence;
         _preparation = new CommandPreparation(1, start.Seed);
     }
 
     public SessionStart Start { get; }
 
+    public SessionMode Mode { get; }
+
     public void AttachConnection(ulong connectionId) => _connections.Add(connectionId);
 
     public bool DetachConnection(ulong connectionId) => _connections.Remove(connectionId);
 
-    public void AddValidator(ICommandValidator validator)
+    public void Register(ICommandValidator validator)
     {
         Guard.ThrowIfNull(validator, nameof(validator));
 
         _validators.Add(validator);
     }
 
-    public void Register<T>(
-        ulong id,
-        ICommandValidator<T>? validator = null,
-        ICommandMutator<T>? mutator = null,
-        ICommandExecutor<T>? executor = null) where T : struct
+    public void Register<T>(ulong id)
     {
-        _commands.Register<T>(id);
-        _policies[typeof(T)] = new CommandPolicy<T>(validator, mutator, executor);
+        RegisterCommandType<T>(id);
     }
 
-    public CommandKey Send<T>(in T payload, long simulationStep) where T : struct
+    public void Register<T>(ICommandValidator<T> validator)
+        => GetOrCreatePolicy<T>().Register(validator);
+
+    public void Register<T>(ICommandMutator<T> mutator)
+        => GetOrCreatePolicy<T>().Register(mutator);
+
+    public void Register<T>(ICommandExecutor<T> executor)
+        => GetOrCreatePolicy<T>().Register(executor);
+
+    private void RegisterCommandType<T>(ulong id)
+    {
+        if (TryGetRegisteredCommandId<T>(out ulong registeredId))
+        {
+            if (registeredId != id)
+            {
+                throw new InvalidOperationException($"Command '{typeof(T)}' is already registered with a different ID.");
+            }
+
+            return;
+        }
+
+        _commands.Register<T>(id);
+    }
+
+    private bool TryGetRegisteredCommandId<T>(out ulong id)
+    {
+        try
+        {
+            id = _commands.GetId<T>();
+            return true;
+        }
+        catch (KeyNotFoundException)
+        {
+            id = default;
+            return false;
+        }
+    }
+
+    private CommandPolicy<T> GetOrCreatePolicy<T>()
+    {
+        _commands.GetId<T>();
+        if (_policies.TryGetValue(typeof(T), out ICommandPolicy? existing))
+        {
+            return existing is CommandPolicy<T> typedPolicy
+                ? typedPolicy
+                : throw new InvalidOperationException($"Command policy type mismatch for '{typeof(T)}'.");
+        }
+
+        var policy = new CommandPolicy<T>();
+        _policies.Add(typeof(T), policy);
+        return policy;
+    }
+
+    public CommandKey Send<T>(in T payload, long simulationStep)
     {
         ulong typeId = _commands.GetId<T>();
         var key = new CommandKey(Start.SessionId, Start.AuthorId, checked(_nextSequence++));
         var header = new CommandHeader(key, typeId, simulationStep, GetNextOrder(simulationStep));
         byte[] bytes = Serialize(payload);
-        var record = new JournalRecord(header, CommandResult.Accepted, bytes, bytes);
-        _journal.Append(record);
-        _model.SetCommand(GetPolicy<T>().CreateEntry(header, bytes, _payloadHandler));
+        if (Mode != SessionMode.Client || IsPredicted(typeId))
+        {
+            var record = new JournalRecord(header, CommandResult.Accepted, bytes, bytes);
+            _journal.Append(record);
+            _model.SetCommand(GetPolicy<T>().CreateEntry(header, bytes, _payloadHandler));
+        }
+
         Broadcast(CommandProtocol.EncodeProposal(header, bytes));
         return key;
     }
@@ -238,7 +304,7 @@ public sealed class SessionHost : ISession
         _model.Tick(simulationStep);
     }
 
-    private byte[] Serialize<T>(in T payload) where T : struct
+    private byte[] Serialize<T>(in T payload)
     {
         var writer = new ArrayBufferWriter<byte>();
         _payloadHandler.Write(payload, writer);
@@ -269,7 +335,7 @@ public sealed class SessionHost : ISession
         }
     }
 
-    private CommandOutcome Receive<T>(CommandHeader header, CommandHeader requestHeader, ReadOnlySpan<byte> requestPayload) where T : struct
+    private CommandOutcome Receive<T>(CommandHeader header, CommandHeader requestHeader, ReadOnlySpan<byte> requestPayload)
     {
         T payload;
         try
@@ -309,12 +375,15 @@ public sealed class SessionHost : ISession
         return new CommandOutcome(CommandResult.Accepted, header);
     }
 
-    private ICommandPolicy<T> GetPolicy<T>() where T : struct
+    private ICommandPolicy<T> GetPolicy<T>()
         => _policies.TryGetValue(typeof(T), out ICommandPolicy? policy) && policy is ICommandPolicy<T> typedPolicy
             ? typedPolicy
-            : new CommandPolicy<T>(null, null, null);
+            : new CommandPolicy<T>();
 
-    private bool ValidateCommon<T>(in Command<T> command) where T : struct
+    private bool IsPredicted(ulong typeId)
+        => _commands.TryGet(typeId, out ICommandRegistration? registration) && registration is { IsPredicted: true };
+
+    private bool ValidateCommon<T>(in Command<T> command)
     {
         for (int index = 0; index < _validators.Count; index++)
         {
@@ -332,7 +401,7 @@ public sealed class SessionHost : ISession
         CommandEntry CreateEntry(CommandHeader header, ReadOnlySpan<byte> payload, ICommandPayloadHandler payloadHandler);
     }
 
-    private interface ICommandPolicy<T> : ICommandPolicy where T : struct
+    private interface ICommandPolicy<T> : ICommandPolicy
     {
         bool Validate(in Command<T> command);
 
@@ -341,20 +410,27 @@ public sealed class SessionHost : ISession
         new CommandEntry CreateEntry(CommandHeader header, ReadOnlySpan<byte> payload, ICommandPayloadHandler payloadHandler);
     }
 
-    private sealed class CommandPolicy<T>(
-        ICommandValidator<T>? validator,
-        ICommandMutator<T>? mutator,
-        ICommandExecutor<T>? executor) : ICommandPolicy<T> where T : struct
+    private sealed class CommandPolicy<T> : ICommandPolicy<T>
     {
-        public bool Validate(in Command<T> command) => validator?.Validate(in command) ?? true;
+        private ICommandValidator<T>? _validator;
+        private ICommandMutator<T>? _mutator;
+        private ICommandExecutor<T>? _executor;
 
-        public void Mutate(ref T payload, CommandPreparation preparation) => mutator?.Mutate(ref payload, preparation);
+        public void Register(ICommandValidator<T> validator) => _validator = validator;
+
+        public void Register(ICommandMutator<T> mutator) => _mutator = mutator;
+
+        public void Register(ICommandExecutor<T> executor) => _executor = executor;
+
+        public bool Validate(in Command<T> command) => _validator?.Validate(in command) ?? true;
+
+        public void Mutate(ref T payload, CommandPreparation preparation) => _mutator?.Mutate(ref payload, preparation);
 
         public CommandEntry CreateEntry(CommandHeader header, ReadOnlySpan<byte> payload, ICommandPayloadHandler payloadHandler)
-            => new(header, payload, new CommandEntryInvoker<T>(payloadHandler, executor));
+            => new(header, payload, new CommandEntryInvoker<T>(payloadHandler, _executor));
     }
 
-    private sealed class CommandEntryInvoker<T>(ICommandPayloadHandler payloadHandler, ICommandExecutor<T>? executor) : ICommandEntryInvoker where T : struct
+    private sealed class CommandEntryInvoker<T>(ICommandPayloadHandler payloadHandler, ICommandExecutor<T>? executor) : ICommandEntryInvoker
     {
         public void Execute(CommandHeader header, ReadOnlySpan<byte> finalPayload)
         {
@@ -373,14 +449,14 @@ public sealed class SessionHost : ISession
     {
         public CommandOutcome Outcome { get; private set; }
 
-        public void Visit<T>() where T : struct => Outcome = host.Receive<T>(header, requestHeader, payload);
+        public void Visit<T>() => Outcome = host.Receive<T>(header, requestHeader, payload);
     }
 
     private struct OutcomeVisitor(SessionHost host, CommandHeader header, byte[] payload) : ICommandVisitor
     {
         public CommandEntry? Entry { get; private set; }
 
-        public void Visit<T>() where T : struct => Entry = host.GetPolicy<T>().CreateEntry(header, payload, host._payloadHandler);
+        public void Visit<T>() => Entry = host.GetPolicy<T>().CreateEntry(header, payload, host._payloadHandler);
     }
 }
 

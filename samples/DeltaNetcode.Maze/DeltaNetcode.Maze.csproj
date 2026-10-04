@@ -9,5 +9,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/DeltaNetcode/DeltaNetcode.csproj" />
+    <ProjectReference Include="../../src/DeltaNetcode.Generators/DeltaNetcode.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>

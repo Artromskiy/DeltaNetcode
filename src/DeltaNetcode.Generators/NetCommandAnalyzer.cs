@@ -36,14 +36,14 @@ public sealed class NetCommandAnalyzer : DiagnosticAnalyzer
     {
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
-        context.RegisterSyntaxNodeAction(Analyze, SyntaxKind.StructDeclaration, SyntaxKind.RecordDeclaration);
+        context.RegisterSyntaxNodeAction(Analyze, SyntaxKind.StructDeclaration, SyntaxKind.ClassDeclaration, SyntaxKind.RecordDeclaration);
     }
 
     private static void Analyze(SyntaxNodeAnalysisContext context)
     {
         if (context.Node is not TypeDeclarationSyntax declaration
             || context.SemanticModel.GetDeclaredSymbol(declaration, context.CancellationToken) is not INamedTypeSymbol type
-            || type.TypeKind != TypeKind.Struct)
+            || type.TypeKind is not (TypeKind.Struct or TypeKind.Class))
         {
             return;
         }

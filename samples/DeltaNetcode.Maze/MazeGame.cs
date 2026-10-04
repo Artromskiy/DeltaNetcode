@@ -18,6 +18,7 @@ public enum ItemType : byte
     Trap
 }
 
+[NetCommand(Id = 0x4D415A4500000001, Predicted = true)]
 public readonly record struct MoveCommand(MoveDirection Direction)
 {
     public const ulong Id = 0x4D415A4500000001;
@@ -92,36 +93,49 @@ public static class MazeSession
         AuthorId author,
         MazeWorld world,
         ITransport? transport = null,
-        ulong seed = 123)
+        ulong seed = 123,
+        SessionMode mode = SessionMode.Local)
     {
+#if NET10_0
+        ArgumentNullException.ThrowIfNull(world);
+#else
         if (world is null)
         {
             throw new ArgumentNullException(nameof(world));
         }
+#endif
 
         var registry = new CommandRegistry();
-        registry.Register<MoveCommand>(MoveCommand.Id);
+        foreach (ICommandRegistration registration in GeneratedCommands.Registrations)
+        {
+            registry.Register(registration);
+        }
+
         var session = new SessionHost(
             new SessionStart(sessionId, author, protocolId, 0, seed),
             registry,
             new MazeCommandPayloadHandler(),
             new RollbackSessionModel(new MazeSimulation(world), 0, historyDepth: 32),
             new MemoryCommandJournal(),
-            transport: transport);
-        session.Register<MoveCommand>(MoveCommand.Id, new MazeMoveValidator(world), executor: new MazeMoveExecutor(world));
+            transport: transport,
+            mode: mode);
+        session.Register<MoveCommand>(registry.GetId<MoveCommand>());
+        session.Register<MoveCommand>(new MazeMoveValidator(world));
+        session.Register<MoveCommand>(new MazeMoveExecutor(world));
         return session;
     }
 }
 
 public static class MazePayloadCodec
 {
-    public static byte[] Encode(MoveCommand command) => [(byte)command.Direction];
+    public static byte[] Encode(MoveCommand command)
+        => [(byte)command.Direction];
 
     public static bool TryDecode(ReadOnlySpan<byte> payload, out MoveCommand command)
     {
         if (payload.Length != 1)
         {
-            command = default;
+            command = new MoveCommand(default);
             return false;
         }
 
@@ -165,7 +179,7 @@ internal sealed class MazeMoveExecutor(MazeWorld world) : ICommandExecutor<MoveC
 
 internal sealed class MazeCommandPayloadHandler : ICommandPayloadHandler
 {
-    public void Write<T>(in T payload, IBufferWriter<byte> output) where T : struct
+    public void Write<T>(in T payload, IBufferWriter<byte> output)
     {
         if (typeof(T) != typeof(MoveCommand))
         {
@@ -177,7 +191,7 @@ internal sealed class MazeCommandPayloadHandler : ICommandPayloadHandler
         output.Advance(1);
     }
 
-    public T Read<T>(ReadOnlySpan<byte> payload) where T : struct
+    public T Read<T>(ReadOnlySpan<byte> payload)
     {
         if (typeof(T) != typeof(MoveCommand) || !MazePayloadCodec.TryDecode(payload, out MoveCommand command))
         {
