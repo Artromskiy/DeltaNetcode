@@ -158,7 +158,7 @@ internal static class MazeRules
 
 internal sealed class MazeMoveValidator(MazeWorld world) : ICommandValidator<MoveCommand>
 {
-    public bool Validate(in Command<MoveCommand> command)
+    public bool Validate(in Command<MoveCommand> command, in CommandValidationContext context)
     {
         uint playerId = command.Header.Key.AuthorId.Value;
         if (command.Payload.Direction > MoveDirection.Left || playerId > int.MaxValue || !world.Players.TryGetValue((int)playerId, out PlayerState player))

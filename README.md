@@ -3,7 +3,7 @@
 DeltaNetcode is an engine independent .NET library for sessions whose game
 state belongs to the application. The library provides command identity,
 typed registration, command validation and mutation stages, an in-memory
-journal, transport framing, session routing, and a fixed step rollback model.
+journal, transport framing, session join/resume, routing, and a fixed step rollback model.
 Applications provide payload encoding, simulation state serialization,
 authentication, transport, and game command handlers.
 
@@ -60,9 +60,10 @@ proposal through `ITransport`; commands marked with
 server outcomes replace predictions with the authoritative payload; rejected
 outcomes remove them and roll back the model. Other client commands wait for
 the server outcome before entering local simulation. `SessionServer.Bind`
-attaches an authenticated connection to a session and author. Feed transport
-messages to `SessionServer.Receive`; route outcomes through
-`CommandProtocol.TryReadOutcome` and `SessionHost.ApplyOutcome`.
+attaches an authenticated connection to a session and author. Feed messages to
+`SessionServer.Receive`; on clients, `SessionClient.Receive` applies server
+outcomes and coordinates snapshot or replay synchronization. Validators receive
+`CommandValidationContext.CurrentStep` from the authoritative session.
 
 `SessionHost.Send` serializes the payload immediately and retains the encoded
 bytes. Mutating a class command after `Send` does not change the queued or
@@ -84,6 +85,11 @@ session.Register<MoveCommand>(movementValidator);
 session.Register<MoveCommand>(movementMutator);
 session.Register<MoveCommand>(movementExecutor);
 
+var client = new SessionClient(session);
+client.BeginJoin(transport, connectionId);
+// Feed server frames to client.Receive(message) and wait until client.IsReady.
+
+// Submit commands after synchronization completes.
 CommandKey key = session.Send(new MoveCommand { EntityId = 7, X = 1, Y = 0 }, step: 12);
 session.Tick(12);
 ```
@@ -110,8 +116,12 @@ The snapshot cursor combines the completed anchor step with the highest
 authoritative session order observed at capture time. The journal returns
 accepted records after the cursor in `(Step, Order)` order. This includes
 future commands accepted before the snapshot and commands accepted later
-within the retained rollback window. During network transfer, queue newly
-arriving outcomes until the snapshot and journal records have been applied.
+within the retained rollback window. `SessionClient` applies the snapshot, its
+accepted tail and unresolved outcomes before it becomes ready. When the journal
+can provide complete revision history, a reconnect replays only changed
+outcomes; otherwise it falls back to a fresh snapshot. Pending proposals and
+cancellations are sent again after synchronization using their original keys
+and payload bytes.
 
 ```csharp
 SessionSnapshot snapshot = authority.CaptureSnapshot();
@@ -128,17 +138,21 @@ foreach (JournalRecord record in authority.ReadAcceptedAfter(snapshot.Cursor))
 
 ## Transport contract
 
-`CommandProtocol` encodes proposals, cancellations, and outcomes as byte
-messages. It does not choose sockets, reliability, encryption, authentication,
-or packet batching. The application owns those choices through `ITransport`.
-The server trusts author identity only from the connection binding; the author
-field inside an incoming message is replaced before processing.
+`CommandProtocol` encodes proposals, cancellations, outcomes, snapshots and
+join/resume control messages as byte frames. It does not choose sockets,
+reliability, encryption, authentication, or packet batching. The application
+owns those choices through `ITransport`; synchronization responses must be
+delivered in order. The application authenticates a connection and calls
+`SessionServer.Bind` before it can request synchronization. The server trusts
+author identity only from that binding; the author field inside a command
+message is replaced before processing.
 
 The built-in `MemoryCommandJournal` retains command outcomes and cancellation
-tombstones for the lifetime of the session. `SessionSnapshot` captures model
-state and command preparation state; applications choose where to persist or
-how to transport it. `CommandProtocol` frames snapshots but does not compress
-or fragment them.
+tombstones for the lifetime of the session and exposes revisioned changes for
+incremental resume. A journal without revision history uses snapshot sync.
+`SessionSnapshot` captures model state and command preparation state;
+applications choose where to persist or how to transport it. `CommandProtocol`
+frames snapshots but does not compress or fragment them.
 
 ## Packages and examples
 

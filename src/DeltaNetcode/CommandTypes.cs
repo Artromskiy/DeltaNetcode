@@ -25,6 +25,58 @@ public readonly record struct CommandKey(SessionId SessionId, AuthorId AuthorId,
 /// <param name="Order">The highest authoritative session order observed at capture time.</param>
 public readonly record struct CommandCursor(long Step, uint Order);
 
+/// <summary>Provides session state needed to validate a command.</summary>
+/// <param name="CurrentStep">The last simulation step applied by the authoritative session.</param>
+public readonly record struct CommandValidationContext(long CurrentStep);
+
+/// <summary>Identifies the client state used to resume a session synchronization.</summary>
+/// <param name="CurrentStep">The last simulation step applied by the client.</param>
+/// <param name="JournalRevision">The last fully received authoritative journal revision, if available.</param>
+/// <param name="LastResolvedAuthorSequence">The last contiguous author sequence resolved by this client, if available.</param>
+public readonly record struct SessionResumeCursor(
+    long CurrentStep,
+    ulong? JournalRevision,
+    ulong? LastResolvedAuthorSequence);
+
+/// <summary>Requests a full snapshot or incremental replay for an authenticated session connection.</summary>
+/// <param name="SessionId">The application session identifier.</param>
+/// <param name="ProtocolId">The expected command protocol identifier.</param>
+/// <param name="Cursor">The client's last completed synchronization cursor.</param>
+public readonly record struct SessionSyncRequest(
+    SessionId SessionId,
+    ProtocolId ProtocolId,
+    SessionResumeCursor Cursor);
+
+/// <summary>Describes the synchronization response selected by the server.</summary>
+public enum SessionSyncStatus : byte
+{
+    /// <summary>The server can replay journal changes after the supplied revision.</summary>
+    Replay,
+    /// <summary>The server will send a snapshot and accepted commands after its replay cursor.</summary>
+    Snapshot,
+    /// <summary>The requested session is not available on this authenticated connection.</summary>
+    SessionNotFound,
+    /// <summary>The client and server use different command protocol identifiers.</summary>
+    ProtocolMismatch
+}
+
+/// <summary>Describes the local client's connection and synchronization state.</summary>
+public enum SessionClientState : byte
+{
+    /// <summary>No join or resume synchronization has started.</summary>
+    Disconnected,
+    /// <summary>The client has sent a synchronization request and awaits the server response.</summary>
+    Joining,
+    /// <summary>The client is applying a snapshot or journal replay.</summary>
+    Synchronizing,
+    /// <summary>The client has applied the synchronization stream and can submit commands.</summary>
+    Ready,
+    /// <summary>The authenticated connection is not bound to the requested session.</summary>
+    SessionNotFound,
+    /// <summary>The client and server protocol identifiers do not match.</summary>
+    ProtocolMismatch
+}
+
 /// <summary>
 /// Captures the next entity identifier and random state used when preparing accepted commands.
 /// </summary>

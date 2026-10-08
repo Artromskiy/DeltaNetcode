@@ -37,6 +37,30 @@ public interface ICommandJournal
     void Clear();
 }
 
+/// <summary>Exposes revisioned journal changes used by incremental session resume.</summary>
+/// <remarks>
+/// Implementations retain the final record for each command key. A record's revision changes
+/// whenever its authoritative outcome or cancellation state changes. Return <see langword="false"/>
+/// when the requested revision is older than the retained history; the session then sends a snapshot.
+/// </remarks>
+public interface ICommandChangeJournal : ICommandJournal
+{
+    /// <summary>Gets the latest journal revision.</summary>
+    ulong Revision { get; }
+
+    /// <summary>Reads final records changed after a revision when the retained history is complete.</summary>
+    /// <param name="revision">The last revision already applied by the client.</param>
+    /// <param name="records">Receives changed records in revision order.</param>
+    /// <returns><see langword="true"/> when the complete change range is available.</returns>
+    bool TryReadChangesAfter(ulong revision, out IReadOnlyList<JournalRecord> records);
+
+    /// <summary>Reads the current outcomes for one author's unresolved command sequences.</summary>
+    /// <param name="author">The author whose command outcomes are requested.</param>
+    /// <param name="lastResolvedSequence">The last contiguous resolved sequence, or <see langword="null"/> if none.</param>
+    /// <returns>Matching records in author sequence order.</returns>
+    IEnumerable<JournalRecord> ReadAuthorOutcomesAfter(AuthorId author, ulong? lastResolvedSequence);
+}
+
 /// <summary>Stores the request and authoritative result for one command.</summary>
 public sealed class JournalRecord
 {
@@ -49,16 +73,22 @@ public sealed class JournalRecord
     /// <param name="requestPayload">The original submitted payload bytes.</param>
     /// <param name="finalPayload">The final accepted payload bytes, or empty for a non-accepted result.</param>
     /// <param name="requestHeader">The original proposal header when it differs from the authoritative header.</param>
+    /// <param name="revision">The journal revision at which this record last changed.</param>
+    /// <param name="isCancelled">Whether the command has been cancelled.</param>
     public JournalRecord(
         CommandHeader header,
         CommandResult result,
         ReadOnlySpan<byte> requestPayload,
         ReadOnlySpan<byte> finalPayload,
-        CommandHeader? requestHeader = null)
+        CommandHeader? requestHeader = null,
+        ulong revision = 0,
+        bool isCancelled = false)
     {
         Header = header;
         RequestHeader = requestHeader ?? header;
         Result = result;
+        Revision = revision;
+        IsCancelled = isCancelled;
         _requestPayload = requestPayload.ToArray();
         _finalPayload = finalPayload.ToArray();
     }
@@ -72,6 +102,9 @@ public sealed class JournalRecord
     /// <summary>Gets the recorded decision for the command.</summary>
     public CommandResult Result { get; }
 
+    /// <summary>Gets the authoritative journal revision at which this record last changed.</summary>
+    public ulong Revision { get; internal set; }
+
     /// <summary>Gets the owned bytes submitted in the original request.</summary>
     public ReadOnlyMemory<byte> RequestPayload => _requestPayload;
 
@@ -83,9 +116,14 @@ public sealed class JournalRecord
 }
 
 /// <summary>Stores command records in memory for one session lifetime.</summary>
-public sealed class MemoryCommandJournal : ICommandJournal
+public sealed class MemoryCommandJournal : ICommandChangeJournal
 {
     private readonly Dictionary<CommandKey, JournalRecord> _records = [];
+    private ulong _revision;
+    private ulong _historyFloor;
+
+    /// <inheritdoc />
+    public ulong Revision => _revision;
 
     /// <inheritdoc />
     public bool TryGet(CommandKey key, out JournalRecord? record)
@@ -95,10 +133,15 @@ public sealed class MemoryCommandJournal : ICommandJournal
     public void Append(in JournalRecord record)
     {
         Guard.ThrowIfNull(record, nameof(record));
-        if (!_records.TryAdd(record.Header.Key, record))
+        if (_records.ContainsKey(record.Header.Key))
         {
             throw new InvalidOperationException($"Command key '{record.Header.Key}' already exists in the journal.");
         }
+
+        ulong nextRevision = checked(_revision + 1);
+        record.Revision = nextRevision;
+        _records.Add(record.Header.Key, record);
+        _revision = nextRevision;
     }
 
     /// <inheritdoc />
@@ -106,20 +149,28 @@ public sealed class MemoryCommandJournal : ICommandJournal
     {
         Guard.ThrowIfNull(record, nameof(record));
 
+        ulong nextRevision = checked(_revision + 1);
+        record.Revision = nextRevision;
         _records[record.Header.Key] = record;
+        _revision = nextRevision;
     }
 
     /// <inheritdoc />
     public void Cancel(CommandKey key)
     {
+        ulong nextRevision = checked(_revision + 1);
         if (_records.TryGetValue(key, out JournalRecord? record))
         {
             record.IsCancelled = true;
-            return;
+            record.Revision = nextRevision;
+        }
+        else
+        {
+            var tombstoneHeader = new CommandHeader(key, 0, long.MinValue, 0);
+            _records.Add(key, new JournalRecord(tombstoneHeader, CommandResult.Cancelled, [], [], revision: nextRevision, isCancelled: true));
         }
 
-        var tombstoneHeader = new CommandHeader(key, 0, long.MinValue, 0);
-        _records.Add(key, new JournalRecord(tombstoneHeader, CommandResult.Cancelled, [], []) { IsCancelled = true });
+        _revision = nextRevision;
     }
 
     /// <inheritdoc />
@@ -164,7 +215,55 @@ public sealed class MemoryCommandJournal : ICommandJournal
     }
 
     /// <inheritdoc />
-    public void Clear() => _records.Clear();
+    public bool TryReadChangesAfter(ulong revision, out IReadOnlyList<JournalRecord> records)
+    {
+        if (revision < _historyFloor || revision > _revision)
+        {
+            records = Array.Empty<JournalRecord>();
+            return false;
+        }
+
+        var changed = new List<JournalRecord>();
+        foreach (JournalRecord record in _records.Values)
+        {
+            if (record.Revision > revision)
+            {
+                changed.Add(record);
+            }
+        }
+
+        changed.Sort(static (left, right) => left.Revision.CompareTo(right.Revision));
+        records = changed;
+        return true;
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<JournalRecord> ReadAuthorOutcomesAfter(AuthorId author, ulong? lastResolvedSequence)
+    {
+        var records = new List<JournalRecord>();
+        foreach (JournalRecord record in _records.Values)
+        {
+            CommandKey key = record.Header.Key;
+            if (key.AuthorId == author
+                && (lastResolvedSequence is null || key.Sequence > lastResolvedSequence.Value))
+            {
+                records.Add(record);
+            }
+        }
+
+        records.Sort(static (left, right) => left.Header.Key.Sequence.CompareTo(right.Header.Key.Sequence));
+        return records;
+    }
+
+    /// <inheritdoc />
+    public void Clear()
+    {
+        ulong nextRevision = checked(_revision + 1);
+        _records.Clear();
+        _revision = nextRevision;
+        _historyFloor = _revision;
+    }
+
 }
 
 /// <summary>Sends encoded session messages over an application-owned transport.</summary>

@@ -24,8 +24,9 @@ public interface ICommandValidator
     /// <summary>Returns whether a command satisfies this validation rule.</summary>
     /// <typeparam name="T">The command payload type.</typeparam>
     /// <param name="command">The command and its session header.</param>
+    /// <param name="context">The authoritative session state used for validation.</param>
     /// <returns><see langword="true"/> when the command is valid.</returns>
-    bool Validate<T>(in Command<T> command);
+    bool Validate<T>(in Command<T> command, in CommandValidationContext context);
 }
 
 /// <summary>Validates commands of one payload type.</summary>
@@ -34,8 +35,9 @@ public interface ICommandValidator<T>
 {
     /// <summary>Returns whether a command satisfies this validation rule.</summary>
     /// <param name="command">The command and its session header.</param>
+    /// <param name="context">The authoritative session state used for validation.</param>
     /// <returns><see langword="true"/> when the command is valid.</returns>
-    bool Validate(in Command<T> command);
+    bool Validate(in Command<T> command, in CommandValidationContext context);
 }
 
 /// <summary>Mutates a command payload before an authority accepts and records it.</summary>

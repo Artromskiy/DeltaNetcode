@@ -16,6 +16,10 @@ or model.
 At construction it is `SessionStart.Step - 1`. `Tick(step)` advances the model
 and updates the session's current step. A session cannot tick backward.
 
+Validators receive a `CommandValidationContext` when they run. Its
+`CurrentStep` is the last step applied by the authoritative session, so time
+checks use the same clock as scheduling.
+
 `ISession` exposes command registration, send/cancel, transport connection
 attachment, authoritative outcome application, ticking, snapshots, typed
 command dispatch and replay reads. `VisitCommandType<TVisitor>` dispatches a
@@ -59,6 +63,11 @@ get accepted, non-cancelled records that must be replayed. Each
 `JournalRecord` owns its request and final payload bytes. Records are returned
 in deterministic simulation order by `MemoryCommandJournal`.
 
+`ICommandChangeJournal` optionally exposes a monotonically increasing revision
+and complete changes after that revision. `MemoryCommandJournal` implements
+this contract. A journal that has cleared or compacted older history reports
+that the range is unavailable; the server then sends a snapshot instead.
+
 ## Client/server flow
 
 `SessionMode.Local` processes commands in the local host. A server host
@@ -70,6 +79,58 @@ server outcome arrives.
 `SessionServer` associates transport connection IDs with a session and the
 author assigned by the application's authentication layer. For incoming
 proposals it uses this bound author instead of trusting the author field in the
-message. `CommandProtocol` frames proposals, cancellations, outcomes and
-snapshots; it does not provide sockets, reliability, encryption, compression
-or authentication.
+message. Call `Bind` after authentication, then pass client frames to
+`SessionServer.Receive`. A client creates `SessionClient`, calls
+`BeginJoin(transport, connectionId)`, and feeds received frames to `Receive`.
+The client's `SessionStart.AuthorId` must match the author used by the server's
+`Bind` call. The sync completion frame carries the authoritative current step;
+the client advances its model to that step before it becomes ready.
+The client becomes ready after applying either a snapshot plus accepted tail,
+or a revisioned journal replay. The same `SessionClient` retains its resume
+cursor across `Disconnect` and can join over a replacement connection.
+
+At synchronization completion, the client resends any unresolved proposal or
+cancellation with the same command key and serialized bytes. This lets the
+server return the original journal outcome for a request it already processed.
+The application must keep synchronization frames ordered through its
+`ITransport`; the package does not add reliability, authentication, encryption,
+compression or sockets.
+
+```mermaid
+classDiagram
+    class ISessionClient {
+        +Session
+        +State
+        +IsReady
+        +BeginJoin(transport, connectionId)
+        +Receive(message)
+        +Disconnect()
+    }
+    class SessionClient {
+        -SessionHost session
+        -resume cursor
+    }
+    class SessionHost {
+        +ApplyOutcome(outcome, payload)
+        +CaptureSnapshot()
+        +ReadAcceptedAfter(cursor)
+    }
+    class SessionServer {
+        +Bind(connectionId, session, author)
+        +Receive(connectionId, message)
+    }
+    class ICommandChangeJournal {
+        <<interface>>
+        +Revision
+        +TryReadChangesAfter(revision)
+        +ReadAuthorOutcomesAfter(author, sequence)
+    }
+    SessionClient ..|> ISessionClient
+    SessionClient --> SessionHost : applies sync and outcomes
+    SessionServer --> SessionHost : routes requests
+    SessionHost --> ICommandChangeJournal : optional replay history
+```
+
+`CommandProtocol` frames proposals, cancellations, outcomes, snapshots and
+join/resume control messages. It does not provide sockets, reliability,
+encryption, compression or authentication.

@@ -644,7 +644,7 @@ public sealed class MazeConsumerTests
 
     private sealed class TestCommandValidator(bool allow) : ICommandValidator<TestCommand>
     {
-        public bool Validate(in Command<TestCommand> command) => allow;
+        public bool Validate(in Command<TestCommand> command, in CommandValidationContext context) => allow;
     }
 
     private sealed class TestCommandMutator : ICommandMutator<TestCommand>

@@ -95,11 +95,16 @@ public sealed class SessionHost : ISession
     private readonly ICommandRegistry _commands;
     private readonly ICommandPayloadHandler _payloadHandler;
     private readonly ICommandJournal _journal;
+    private readonly ICommandChangeJournal? _changeJournal;
     private readonly ISessionModel _model;
     private readonly CommandPreparation _preparation;
     private ITransport? _transport;
     private readonly HashSet<ulong> _connections = [];
+    private readonly Dictionary<CommandKey, byte[]> _pendingMessages = [];
+    private readonly SortedSet<ulong> _resolvedSequences = [];
     private ulong _nextSequence;
+    private ulong _nextResolvedSequence;
+    private ulong? _lastResolvedSequence;
     private uint _nextOrder = 1;
     private long _currentStep;
     private CommandCursor? _snapshotCursor;
@@ -134,9 +139,12 @@ public sealed class SessionHost : ISession
         _payloadHandler = payloadHandler;
         _model = model;
         _journal = journal;
+        _changeJournal = journal as ICommandChangeJournal;
         _transport = transport;
         Mode = mode;
         _nextSequence = firstSequence;
+        _nextResolvedSequence = firstSequence;
+        _lastResolvedSequence = firstSequence == 0 ? null : firstSequence - 1;
         _currentStep = checked(start.Step - 1);
         _preparation = new CommandPreparation(preparationState ?? new CommandPreparationState(1, start.Seed));
     }
@@ -253,7 +261,9 @@ public sealed class SessionHost : ISession
                 _model.SetCommand(GetPolicy<T>().CreateEntry(header, bytes, _payloadHandler));
             }
 
-            Broadcast(CommandProtocol.EncodeProposal(header, bytes));
+            byte[] proposal = CommandProtocol.EncodeProposal(header, bytes);
+            _pendingMessages.Add(key, proposal);
+            Broadcast(proposal);
             return key;
         }
 
@@ -338,6 +348,11 @@ public sealed class SessionHost : ISession
             }
 
             _journal.Cancel(key);
+            if (Mode == SessionMode.Client && requester == Start.AuthorId)
+            {
+                _pendingMessages[key] = CommandProtocol.EncodeCancel(key);
+            }
+
             if (requester == Start.AuthorId)
             {
                 Broadcast(CommandProtocol.EncodeCancel(key));
@@ -358,6 +373,11 @@ public sealed class SessionHost : ISession
 
         _journal.Cancel(key);
         _model.Remove(key);
+        if (Mode == SessionMode.Client && requester == Start.AuthorId)
+        {
+            _pendingMessages[key] = CommandProtocol.EncodeCancel(key);
+        }
+
         if (requester == Start.AuthorId)
         {
             Broadcast(CommandProtocol.EncodeCancel(key));
@@ -378,7 +398,45 @@ public sealed class SessionHost : ISession
             return new CommandOutcome(CommandResult.InvalidMessage, outcome.Header);
         }
 
-        if (_snapshotCursor is CommandCursor cursor
+        bool pendingCancellation = IsPendingCancellation(outcome.Header.Key);
+        bool resolvesPendingCancellation = pendingCancellation
+            && (outcome.Result == CommandResult.Cancelled || outcome.Header.TypeId == 0);
+        if (!pendingCancellation || resolvesPendingCancellation)
+        {
+            _pendingMessages.Remove(outcome.Header.Key);
+            ObserveResolvedSequence(outcome.Header.Key);
+        }
+
+        if (pendingCancellation && outcome.Result == CommandResult.Accepted)
+        {
+            bool hasRecord = _journal.TryGet(outcome.Header.Key, out JournalRecord? cancelled);
+            if (!hasRecord || !cancelled!.IsCancelled)
+            {
+                ReadOnlySpan<byte> requestPayload = cancelled is null ? finalPayload : cancelled.RequestPayload.Span;
+                CommandHeader requestHeader = cancelled?.RequestHeader ?? outcome.Header;
+                var record = new JournalRecord(
+                    outcome.Header,
+                    CommandResult.Accepted,
+                    requestPayload,
+                    finalPayload,
+                    requestHeader,
+                    isCancelled: true);
+                if (hasRecord)
+                {
+                    _journal.Replace(record);
+                }
+                else
+                {
+                    _journal.Append(record);
+                }
+            }
+
+            _model.Remove(outcome.Header.Key);
+            return new CommandOutcome(CommandResult.Cancelled, outcome.Header);
+        }
+
+        if (outcome.Result == CommandResult.Accepted
+            && _snapshotCursor is CommandCursor cursor
             && outcome.Header.Step <= cursor.Step
             && outcome.Header.Order <= cursor.Order)
         {
@@ -502,6 +560,13 @@ public sealed class SessionHost : ISession
         _snapshotCursor = snapshot.Cursor;
         _nextOrder = checked(snapshot.Cursor.Order + 1);
         _preparation.Restore(snapshot.Preparation);
+        foreach (KeyValuePair<CommandKey, byte[]> pending in _pendingMessages)
+        {
+            if (CommandProtocol.TryReadCancel(pending.Value, out _))
+            {
+                _model.Remove(pending.Key);
+            }
+        }
     }
 
     /// <summary>Dispatches a registered command type ID to a visitor.</summary>
@@ -543,9 +608,67 @@ public sealed class SessionHost : ISession
         }
     }
 
+    private void ObserveResolvedSequence(CommandKey key)
+    {
+        if (key.AuthorId != Start.AuthorId || key.Sequence < _nextResolvedSequence)
+        {
+            return;
+        }
+
+        _resolvedSequences.Add(key.Sequence);
+        while (_resolvedSequences.Remove(_nextResolvedSequence))
+        {
+            _lastResolvedSequence = _nextResolvedSequence;
+            _nextResolvedSequence = checked(_nextResolvedSequence + 1);
+        }
+    }
+
+    private bool IsPendingCancellation(CommandKey key)
+        => _pendingMessages.TryGetValue(key, out byte[]? message)
+            && CommandProtocol.TryReadCancel(message, out _);
+
     internal bool TryGetJournalRecord(CommandKey key, out JournalRecord? record) => _journal.TryGet(key, out record);
 
-    internal void SendTo(ulong connectionId, ReadOnlySpan<byte> message) => _transport?.Send(connectionId, message);
+    internal bool HasTransport => _transport is not null;
+
+    internal ulong? JournalRevision => _changeJournal?.Revision;
+
+    internal bool TryReadChangesAfter(ulong revision, out IReadOnlyList<JournalRecord> records)
+    {
+        if (_changeJournal is not null)
+        {
+            return _changeJournal.TryReadChangesAfter(revision, out records);
+        }
+
+        records = Array.Empty<JournalRecord>();
+        return false;
+    }
+
+    internal IEnumerable<JournalRecord> ReadAuthorOutcomesAfter(AuthorId author, ulong? lastResolvedSequence)
+        => _changeJournal?.ReadAuthorOutcomesAfter(author, lastResolvedSequence) ?? [];
+
+    internal ulong? LastResolvedAuthorSequence => _lastResolvedSequence;
+
+    internal bool SendTo(ulong connectionId, ReadOnlySpan<byte> message)
+    {
+        if (_transport is null)
+        {
+            return false;
+        }
+
+        _transport.Send(connectionId, message);
+        return true;
+    }
+
+    internal void ResendPending(ulong connectionId)
+    {
+        var pending = new List<KeyValuePair<CommandKey, byte[]>>(_pendingMessages);
+        pending.Sort(static (left, right) => left.Key.Sequence.CompareTo(right.Key.Sequence));
+        foreach (KeyValuePair<CommandKey, byte[]> item in pending)
+        {
+            SendTo(connectionId, item.Value);
+        }
+    }
 
     private void Broadcast(ReadOnlySpan<byte> message)
     {
@@ -580,7 +703,8 @@ public sealed class SessionHost : ISession
     {
         ICommandPolicy<T> policy = GetPolicy<T>();
         var request = new Command<T>(header, payload);
-        if (!ValidateCommon(in request) || !policy.Validate(in request))
+        var context = new CommandValidationContext(_currentStep);
+        if (!ValidateCommon(in request, in context) || !policy.Validate(in request, in context))
         {
             _journal.Append(new JournalRecord(header, CommandResult.Rejected, requestPayload, [], requestHeader));
             return new CommandOutcome(CommandResult.Rejected, header);
@@ -614,11 +738,11 @@ public sealed class SessionHost : ISession
     private bool IsPredicted(ulong typeId)
         => _commands.TryGet(typeId, out ICommandRegistration? registration) && registration is { IsPredicted: true };
 
-    private bool ValidateCommon<T>(in Command<T> command)
+    private bool ValidateCommon<T>(in Command<T> command, in CommandValidationContext context)
     {
         for (int index = 0; index < _validators.Count; index++)
         {
-            if (!_validators[index].Validate(in command))
+            if (!_validators[index].Validate(in command, in context))
             {
                 return false;
             }
@@ -634,7 +758,7 @@ public sealed class SessionHost : ISession
 
     private interface ICommandPolicy<T> : ICommandPolicy
     {
-        bool Validate(in Command<T> command);
+        bool Validate(in Command<T> command, in CommandValidationContext context);
 
         void Mutate(ref T payload, CommandPreparation preparation);
 
@@ -653,7 +777,8 @@ public sealed class SessionHost : ISession
 
         public void Register(ICommandExecutor<T> executor) => _executor = executor;
 
-        public bool Validate(in Command<T> command) => _validator?.Validate(in command) ?? true;
+        public bool Validate(in Command<T> command, in CommandValidationContext context)
+            => _validator?.Validate(in command, in context) ?? true;
 
         public void Mutate(ref T payload, CommandPreparation preparation) => _mutator?.Mutate(ref payload, preparation);
 
@@ -719,10 +844,10 @@ public interface ISessionServer
     /// <param name="sessionId">The ID of the session to remove.</param>
     void Remove(ulong sessionId);
 
-    /// <summary>Processes a framed client message using the author bound to its connection.</summary>
+    /// <summary>Processes a command, cancellation or synchronization request for a bound connection.</summary>
     /// <param name="connectionId">The authenticated transport connection.</param>
-    /// <param name="message">The encoded proposal or cancellation message.</param>
-    /// <returns>The command result, or <see cref="CommandResult.InvalidMessage"/> for malformed data.</returns>
+    /// <param name="message">The encoded command, cancellation or synchronization message.</param>
+    /// <returns>The command result, or <see cref="CommandResult.InvalidMessage"/> for malformed data. For a synchronization request, <see cref="CommandResult.Accepted"/> means the response stream was sent.</returns>
     CommandResult Receive(ulong connectionId, ReadOnlySpan<byte> message);
 }
 
@@ -805,6 +930,11 @@ public sealed class SessionServer : ISessionServer
             return CommandResult.Rejected;
         }
 
+        if (CommandProtocol.TryReadSyncRequest(message, out SessionSyncRequest syncRequest))
+        {
+            return ReceiveSyncRequest(connectionId, binding.Session, binding.Author, in syncRequest);
+        }
+
         if (CommandProtocol.TryReadCommand(message, out CommandHeader header, out ReadOnlySpan<byte> payload))
         {
             CommandOutcome outcome = binding.Session.Receive(binding.Author, header, payload);
@@ -827,6 +957,99 @@ public sealed class SessionServer : ISessionServer
         }
 
         return CommandResult.InvalidMessage;
+    }
+
+    private static CommandResult ReceiveSyncRequest(
+        ulong connectionId,
+        SessionHost session,
+        AuthorId author,
+        in SessionSyncRequest request)
+    {
+        if (session.Mode != SessionMode.Server || !session.HasTransport)
+        {
+            return CommandResult.Rejected;
+        }
+
+        SessionStart start = session.Start;
+        if (request.SessionId != start.SessionId)
+        {
+            session.SendTo(connectionId, CommandProtocol.EncodeSyncStatus(
+                SessionSyncStatus.SessionNotFound,
+                request.SessionId,
+                request.ProtocolId));
+            return CommandResult.Rejected;
+        }
+
+        if (request.ProtocolId != start.ProtocolId)
+        {
+            session.SendTo(connectionId, CommandProtocol.EncodeSyncStatus(
+                SessionSyncStatus.ProtocolMismatch,
+                start.SessionId,
+                start.ProtocolId));
+            return CommandResult.Conflict;
+        }
+
+        ulong? syncRevision = session.JournalRevision;
+        IReadOnlyList<JournalRecord> changes = Array.Empty<JournalRecord>();
+        bool replay = request.Cursor.CurrentStep <= session.CurrentStep
+            && request.Cursor.JournalRevision is ulong revision
+            && session.TryReadChangesAfter(revision, out changes);
+
+        SessionSyncStatus status = replay ? SessionSyncStatus.Replay : SessionSyncStatus.Snapshot;
+        session.SendTo(connectionId, CommandProtocol.EncodeSyncStatus(status, start.SessionId, start.ProtocolId));
+        var sent = new HashSet<CommandKey>();
+
+        if (replay)
+        {
+            foreach (JournalRecord record in changes)
+            {
+                CommandResult result = record.IsCancelled ? CommandResult.Cancelled : record.Result;
+                if (result == CommandResult.Accepted || result == CommandResult.Cancelled
+                    || (record.Header.Key.AuthorId == author
+                        && (request.Cursor.LastResolvedAuthorSequence is null
+                            || record.Header.Key.Sequence > request.Cursor.LastResolvedAuthorSequence.Value)))
+                {
+                    SendRecordOutcome(session, connectionId, record, sent);
+                }
+            }
+        }
+        else
+        {
+            SessionSnapshot snapshot = session.CaptureSnapshot();
+            var snapshotBuffer = new ArrayBufferWriter<byte>();
+            CommandProtocol.WriteSnapshot(snapshot, snapshotBuffer);
+            session.SendTo(connectionId, snapshotBuffer.WrittenSpan);
+
+            foreach (JournalRecord record in session.ReadAcceptedAfter(snapshot.Cursor))
+            {
+                SendRecordOutcome(session, connectionId, record, sent);
+            }
+        }
+
+        foreach (JournalRecord record in session.ReadAuthorOutcomesAfter(author, request.Cursor.LastResolvedAuthorSequence))
+        {
+            SendRecordOutcome(session, connectionId, record, sent);
+        }
+
+        session.SendTo(connectionId, CommandProtocol.EncodeSyncComplete(start.SessionId, syncRevision, session.CurrentStep));
+        return CommandResult.Accepted;
+    }
+
+    private static void SendRecordOutcome(
+        SessionHost session,
+        ulong connectionId,
+        JournalRecord record,
+        HashSet<CommandKey> sent)
+    {
+        if (!sent.Add(record.Header.Key))
+        {
+            return;
+        }
+
+        CommandResult result = record.IsCancelled ? CommandResult.Cancelled : record.Result;
+        ReadOnlySpan<byte> payload = result == CommandResult.Accepted ? record.FinalPayload.Span : [];
+        var outcome = new CommandOutcome(result, record.Header);
+        session.SendTo(connectionId, CommandProtocol.EncodeOutcome(outcome, payload));
     }
 
     /// <summary>Processes an already-decoded command proposal for a bound connection.</summary>
