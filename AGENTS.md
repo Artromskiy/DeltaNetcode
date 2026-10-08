@@ -1,9 +1,8 @@
 # DeltaNetcode agent router
 
-Scope: engine-independent, high-performance networking for .NET. Keep data
-ownership, buffer movement, allocation and runtime dispatch visible on hot
-paths. This repository is a scaffold; establish public APIs and transport
-boundaries from concrete consumers rather than speculative layers.
+Scope: engine-independent networking for .NET sessions. The runtime provides
+typed command processing, local/client/server session routing, prediction,
+runtime dispatch visible on hot paths.
 
 ## Map — open only as needed
 
@@ -11,6 +10,8 @@ boundaries from concrete consumers rather than speculative layers.
 - ../CONTRACTS.md — cross-project boundaries; open only for integration work.
 - WORKFLOW.md — layout, build and shared pre-commit checks.
 - README.md — public overview; open for documentation or quick-start work.
+- docs/API.md — public session and command behavior.
+- docs/PROTOCOL.md — encoded frame layout and ownership.
 - src/DeltaNetcode — primary library project.
 - tests, benchmarks, samples and probes — verification, measured workloads,
   runnable examples and bounded capability checks.

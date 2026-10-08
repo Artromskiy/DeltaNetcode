@@ -3,13 +3,22 @@
 DeltaNetcode is an engine independent .NET library for sessions whose game
 state belongs to the application. The library provides command identity,
 typed registration, command validation and mutation stages, an in-memory
-journal, transport framing, session join/resume, routing, and a fixed step rollback model.
+journal, transport framing, session join/resume, routing, and a fixed-step
+rollback model.
 Applications provide payload encoding, simulation state serialization,
 authentication, transport, and game command handlers.
 
+## What it provides
+
+- Stable command IDs with generated registrations, an analyzer and an ID code fix.
+- Typed validation, authoritative command mutation and fixed-step execution.
+- Optional client prediction with rollback when the server changes an outcome.
+- A memory journal, snapshots, and join/resume synchronization by replay or snapshot.
+
 ## Command types
 
-Commands can be non-null structs or classes. Register them explicitly, or mark
+Command payloads can be value or reference types; the application codec defines
+their byte encoding and null handling. Register them explicitly, or mark
 them with `[NetCommand]` and use the generated registration list from the
 companion source generator. Generation supplies registrations; the application chooses
 when and which registrations to add. The analyzer reports an informational
@@ -39,31 +48,22 @@ to `Register`. Read its ID from the registry with `commands.GetId<MoveCommand>()
 
 An explicit ID is stable across type renames. ID `0` is reserved. The
 name-derived ID uses UTF-8 FNV-1a 64 over the CLR metadata full name, including
-namespace, nested type names, and generic arity.
+namespace, nested type names (joined with `+`) and generic arity.
 
 ## Session model
 
-The application implements `ICommandPayloadHandler`, `ISimulation`, and typed
-command handlers. `RollbackSessionModel` owns the fixed step history and calls
-each `CommandEntry.Execute()` before the matching simulation tick. Callers own
-the clock and invoke `ISession.Tick(step)` for discrete steps. `CurrentStep`
-reports the last applied step. `VisitCommandType<TVisitor>` dispatches a
-registered ID to a class or struct visitor; `ReadAcceptedAfter(cursor)` reads
-accepted replay records without exposing the journal.
+The application implements `ICommandPayloadHandler`, `ISimulation` and typed
+command handlers. `RollbackSessionModel` stores bounded history, executes
+commands in authoritative order, then advances the simulation. The application
+owns the clock and calls `ISession.Tick(step)` for each fixed step.
 
-`SessionHost.Send<T>` obtains the registered ID, session author and sequence.
-In `SessionMode.Local` and `SessionMode.Server`, it runs validation, scheduling
-and mutation before adding the final payload to the model. Server sessions
-broadcast the authoritative outcome. In `SessionMode.Client`, it sends a
-proposal through `ITransport`; commands marked with
-`[NetCommand(Predicted = true)]` are also scheduled in the local model. Accepted
-server outcomes replace predictions with the authoritative payload; rejected
-outcomes remove them and roll back the model. Other client commands wait for
-the server outcome before entering local simulation. `SessionServer.Bind`
-attaches an authenticated connection to a session and author. Feed messages to
-`SessionServer.Receive`; on clients, `SessionClient.Receive` applies server
-outcomes and coordinates snapshot or replay synchronization. Validators receive
-`CommandValidationContext.CurrentStep` from the authoritative session.
+`SessionMode.Local` processes commands in the local host; `Server` validates
+proposals and broadcasts accepted outcomes when configured with a transport;
+`Client` submits proposals and may predict commands marked
+`[NetCommand(Predicted = true)]`. `SessionClient` synchronizes a client through
+snapshot/replay join and resume. The server trusts authors bound to authenticated
+connections. Validators receive the authoritative
+`CommandValidationContext.CurrentStep`.
 
 `SessionHost.Send` serializes the payload immediately and retains the encoded
 bytes. Mutating a class command after `Send` does not change the queued or
@@ -94,47 +94,8 @@ CommandKey key = session.Send(new MoveCommand { EntityId = 7, X = 1, Y = 0 }, st
 session.Tick(12);
 ```
 
-Register validators, mutators and executors independently through `ISession`.
-The non-generic `Register` overload attaches a common validator.
-Mutators receive a transactional `CommandPreparation` for allocating stable
-IDs and seeds; only accepted commands commit its state. Accepted payload bytes
-are owned by the journal and reused during rollback.
-
-`CommandPreparationState` seeds the ID allocator and deterministic seed stream.
-`ReserveIds(count)` allocates a contiguous range. Pass the first free ID from
-the loaded game state when creating the session.
-
-`SessionHost.CaptureSnapshot()` asks the session model for a replayable history
-anchor. With `RollbackSessionModel`, this is the oldest retained rollback state;
-it can precede the model's current step so that late accepted commands remain
-replayable after restoration. `ISessionModel.SaveReplayAnchor` gives custom
-models the same integration point for their own history. `Restore` checks the
-session and protocol IDs, restores the model and command preparation state, and
-clears the old command journal.
-
-The snapshot cursor combines the completed anchor step with the highest
-authoritative session order observed at capture time. The journal returns
-accepted records after the cursor in `(Step, Order)` order. This includes
-future commands accepted before the snapshot and commands accepted later
-within the retained rollback window. `SessionClient` applies the snapshot, its
-accepted tail and unresolved outcomes before it becomes ready. When the journal
-can provide complete revision history, a reconnect replays only changed
-outcomes; otherwise it falls back to a fresh snapshot. Pending proposals and
-cancellations are sent again after synchronization using their original keys
-and payload bytes.
-
-```csharp
-SessionSnapshot snapshot = authority.CaptureSnapshot();
-var snapshotBytes = new ArrayBufferWriter<byte>();
-CommandProtocol.WriteSnapshot(snapshot, snapshotBytes);
-
-// Send the snapshot frame, then replay these records on the restored client.
-foreach (JournalRecord record in authority.ReadAcceptedAfter(snapshot.Cursor))
-{
-    var outcome = new CommandOutcome(record.Result, record.Header);
-    client.ApplyOutcome(outcome, record.FinalPayload.Span);
-}
-```
+Registration, deterministic preparation state, snapshots and replay are
+described in the [API guide](docs/API.md).
 
 ## Transport contract
 
@@ -157,8 +118,15 @@ frames snapshots but does not compress or fragment them.
 ## Packages and examples
 
 The DeltaNetcode NuGet package targets .NET Standard 2.1 and .NET 10 with its
-runtime, generator, analyzer and code fix. The [Maze sample](samples/DeltaNetcode.Maze) shows consumer usage.
+runtime, generator, analyzer and code fix. The [Maze sample](samples/DeltaNetcode.Maze)
+shows game commands, while the [generated-command sample](samples/DeltaNetcode.Aot)
+shows generated registration and typed command dispatch.
+
+```xml
+<PackageReference Include="DeltaNetcode" Version="0.0.4" />
+```
 
 ## Further reading
 
 - [Public API guide](docs/API.md)
+- [Wire protocol](docs/PROTOCOL.md)

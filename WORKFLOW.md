@@ -9,8 +9,11 @@ a structural handoff, run:
 ./eng/check-layout.sh
 ```
 
-The scaffold currently has no test project. Add focused tests with the first
-runtime behavior; do not treat the empty library build as behavior coverage.
+The consumer-level NUnit suite is
+`tests/DeltaNetcode.Consumer.Tests/DeltaNetcode.Consumer.Tests.csproj`. It uses
+the Maze sample to cover local and client/server command flows, prediction and
+rollback, multiple clients, malformed messages, snapshots, join/resume and
+journal replay, including cancellation tombstones.
 
 ## Correctness and build
 
@@ -18,6 +21,8 @@ runtime behavior; do not treat the empty library build as behavior coverage.
 dotnet restore DeltaNetcode.slnx -p:NuGetAudit=false
 dotnet build DeltaNetcode.slnx -c Release --no-restore \
   --disable-build-servers -m:1 /p:UseSharedCompilation=false -v:minimal
+dotnet test tests/DeltaNetcode.Consumer.Tests/DeltaNetcode.Consumer.Tests.csproj \
+  -c Release --no-build --no-restore --disable-build-servers -m:1
 git diff --check
 ```
 
