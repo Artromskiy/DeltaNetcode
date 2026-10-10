@@ -14,6 +14,7 @@ authentication, transport, and game command handlers.
 - Typed validation, authoritative command mutation and fixed-step execution.
 - Optional client prediction with rollback when the server changes an outcome.
 - A memory journal, snapshots, and join/resume synchronization by replay or snapshot.
+- Transport-independent session routing and optional transient simulation updates.
 
 ## Command types
 
@@ -68,6 +69,15 @@ connections. Validators receive the authoritative
 `SessionHost.Send` serializes the payload immediately and retains the encoded
 bytes. Mutating a class command after `Send` does not change the queued or
 transmitted command.
+
+For optional higher-frequency local updates, implement
+`ITransientSimulation<TInput>` alongside `ISimulation`. The application frame
+loop calls `TickTransient` to run only the simulation portion between fixed
+session ticks. After each fixed `ISession.Tick`, save the simulation state with
+`ISimulation.Save`; before the next fixed tick, restore it with `ISimulation.Load`,
+send that step's input, and call `ISession.Tick`. Transient updates do not advance
+the session step or enter the command journal. The application owns the frame
+clock and the fixed-state checkpoint.
 
 ```csharp
 var model = new RollbackSessionModel(simulation, initialStep: 0, historyDepth: 120);
@@ -130,3 +140,4 @@ shows generated registration and typed command dispatch.
 
 - [Public API guide](docs/API.md)
 - [Wire protocol](docs/PROTOCOL.md)
+- [Transient simulation updates](docs/TRANSIENT-SIMULATION.md)

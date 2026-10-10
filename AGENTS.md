@@ -2,6 +2,8 @@
 
 Scope: engine-independent networking for .NET sessions. The runtime provides
 typed command processing, local/client/server session routing, prediction,
+bounded fixed-step rollback, join/resume synchronization and optional transient
+simulation updates. Keep data ownership, buffer movement, allocation and
 runtime dispatch visible on hot paths.
 
 ## Map — open only as needed
@@ -12,6 +14,7 @@ runtime dispatch visible on hot paths.
 - README.md — public overview; open for documentation or quick-start work.
 - docs/API.md — public session and command behavior.
 - docs/PROTOCOL.md — encoded frame layout and ownership.
+- docs/TRANSIENT-SIMULATION.md — optional transient update contract.
 - src/DeltaNetcode — primary library project.
 - tests, benchmarks, samples and probes — verification, measured workloads,
   runnable examples and bounded capability checks.

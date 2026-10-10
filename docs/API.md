@@ -74,6 +74,13 @@ get accepted, non-cancelled records that must be replayed. Each
 `JournalRecord` owns its request and final payload bytes. Records are returned
 in deterministic simulation order by `MemoryCommandJournal`.
 
+For local responsiveness between fixed ticks, a simulation may also implement
+`ITransientSimulation<TInput>`. The application calls `TickTransient` from its
+normal frame loop; this runs the simulation-only path and does not advance the
+session step or record command history. Save the state after a fixed session
+tick, then restore it before sending the next input and calling `ISession.Tick`.
+The application owns this checkpoint and decides when fixed ticks are due.
+
 `ICommandChangeJournal` optionally exposes a monotonically increasing revision
 and complete changes after that revision. `MemoryCommandJournal` implements
 this contract. A journal that has cleared or compacted older history reports
@@ -308,3 +315,5 @@ not synchronize concurrent calls; callers must serialize access to each instance
 ## Related guides
 
 - [Wire protocol](PROTOCOL.md) describes message kinds, field layout and byte order.
+- [Transient simulation updates](TRANSIENT-SIMULATION.md) describes the optional
+  application-owned high-frequency simulation loop.
