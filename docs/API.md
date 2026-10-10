@@ -103,6 +103,13 @@ message. Call `Bind` after authentication, then pass client frames to
 The client's `SessionStart.AuthorId` must match the author used by the server's
 `Bind` call. The sync completion frame carries the authoritative current step;
 the client advances its model to that step before it becomes ready.
+After synchronization, the application may call
+`ISessionServer.BroadcastCurrentStep(sessionId)` at its chosen cadence. The
+client coordinator raises `ISessionClient.ServerStepReceived` with the received
+step but does not change simulation state or clock behavior. The application
+decides whether and how that information should affect its clock or game loop.
+Updates received before the client becomes ready are ignored; the sync
+completion frame supplies the step used to finish synchronization.
 The client becomes ready after applying either a snapshot plus accepted tail,
 or a revisioned journal replay. The same `SessionClient` retains its resume
 cursor after a ready `Disconnect` and can join over a replacement connection.
@@ -126,6 +133,7 @@ classDiagram
         +Session
         +State
         +IsReady
+        +ServerStepReceived
         +BeginJoin(transport, connectionId)
         +Receive(message)
         +Disconnect()
@@ -141,6 +149,7 @@ classDiagram
     }
     class SessionServer {
         +Bind(connectionId, session, author)
+        +BroadcastCurrentStep(sessionId)
         +Receive(connectionId, message)
     }
     class ICommandChangeJournal {
@@ -155,9 +164,9 @@ classDiagram
     SessionHost --> ICommandChangeJournal : optional replay history
 ```
 
-`CommandProtocol` frames proposals, cancellations, outcomes, snapshots and
-join/resume control messages. It does not provide sockets, reliability,
-encryption, compression or authentication.
+`CommandProtocol` frames proposals, cancellations, outcomes, snapshots,
+join/resume control messages and server step updates. It does not provide
+sockets, reliability, encryption, compression or authentication.
 
 ## Command admission and identity
 

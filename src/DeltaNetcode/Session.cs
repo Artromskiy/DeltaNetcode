@@ -844,6 +844,12 @@ public interface ISessionServer
     /// <param name="sessionId">The ID of the session to remove.</param>
     void Remove(ulong sessionId);
 
+    /// <summary>Sends the current authoritative step to every connection bound to a server session.</summary>
+    /// <param name="sessionId">The hosted server session to announce.</param>
+    /// <exception cref="KeyNotFoundException">The session is not hosted by this server.</exception>
+    /// <exception cref="InvalidOperationException">The session is not in server mode or has no transport.</exception>
+    void BroadcastCurrentStep(ulong sessionId);
+
     /// <summary>Processes a command, cancellation or synchronization request for a bound connection.</summary>
     /// <param name="connectionId">The authenticated transport connection.</param>
     /// <param name="message">The encoded command, cancellation or synchronization message.</param>
@@ -919,6 +925,37 @@ public sealed class SessionServer : ISessionServer
         for (int index = 0; index < removedConnections.Count; index++)
         {
             Unbind(removedConnections[index]);
+        }
+    }
+
+    /// <inheritdoc />
+    public void BroadcastCurrentStep(ulong sessionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out SessionHost? session))
+        {
+            throw new KeyNotFoundException($"Session '{sessionId}' is not hosted by this server.");
+        }
+
+        if (session.Mode != SessionMode.Server)
+        {
+            throw new InvalidOperationException("Only server-mode sessions can broadcast their current step.");
+        }
+
+        if (!session.HasTransport)
+        {
+            throw new InvalidOperationException("The server session has no transport attached.");
+        }
+
+        byte[]? message = null;
+        foreach (KeyValuePair<ulong, (SessionHost Session, AuthorId Author)> connection in _connections)
+        {
+            if (!ReferenceEquals(connection.Value.Session, session))
+            {
+                continue;
+            }
+
+            message ??= CommandProtocol.EncodeStepUpdate(session.Start.SessionId, session.CurrentStep);
+            session.SendTo(connection.Key, message);
         }
     }
 

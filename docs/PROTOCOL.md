@@ -24,6 +24,7 @@ IDs and payload codecs. Command and outcome frames do not carry the
 | `5` | Sync request | Session and protocol IDs, optional-cursor flags and values, current step. |
 | `6` | Sync status | One-byte `SessionSyncStatus`, session ID and protocol ID. |
 | `7` | Sync complete | Session ID, optional journal revision and authoritative current step. |
+| `8` | Step update | Session ID and current authoritative server step. |
 
 A command key is encoded as a 20-byte tuple: `SessionId` (`UInt64`), `AuthorId`
 (`UInt32`) and author-local `Sequence` (`UInt64`). A command header appends
@@ -48,14 +49,23 @@ when their flag is clear. A sync status is 18 bytes. A sync completion frame
 is 26 bytes and has a one-byte flag indicating whether its fixed-width journal
 revision is present.
 
+A step update is 17 bytes: the kind byte, a `UInt64` session ID and an `Int64`
+current step. The server sends it independently of commands, simulation state
+and the command journal. Applications choose when to call
+`ISessionServer.BroadcastCurrentStep`; the client coordinator validates the
+session ID and raises `ISessionClient.ServerStepReceived` after synchronization.
+Updates received before the client is ready are accepted and ignored because
+the synchronization completion frame already supplies its current step.
+Receiving a step update does not advance or restore the client simulation.
+
 ## Reading and ownership
 
 Use the matching `TryRead...` methods to inspect frames. Command and outcome
 readers return payload spans that borrow the input frame; they do not copy the
 payload. `TryReadSnapshot` copies model state into owned snapshot storage.
 `WriteSnapshot` appends a frame to the supplied `IBufferWriter<byte>`;
-`EncodeProposal`, `EncodeOutcome`, `EncodeCancel` and the synchronization
-encoders return newly allocated byte arrays.
+`EncodeProposal`, `EncodeOutcome`, `EncodeCancel`, and the synchronization and
+step update encoders return newly allocated byte arrays.
 
 Frame readers validate the message kind, required size and encoded enum/flag
 ranges. They do not authenticate a peer, check the connection's bound author,

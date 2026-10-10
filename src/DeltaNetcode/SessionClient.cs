@@ -12,12 +12,18 @@ public interface ISessionClient
     /// <summary>Gets whether an initial snapshot or replay has been fully applied.</summary>
     bool IsReady { get; }
 
+    /// <summary>Raised with the server's current step when a step update arrives after synchronization.</summary>
+    /// <remarks>The event runs from <see cref="Receive"/> and does not change the client simulation or clock.</remarks>
+#pragma warning disable CA1003 // The event carries one step scalar; EventArgs adds an allocation per update.
+    event Action<long>? ServerStepReceived;
+#pragma warning restore CA1003
+
     /// <summary>Connects through a transport and requests a join or resume stream.</summary>
     /// <param name="transport">The application-owned transport used for this connection.</param>
     /// <param name="connectionId">The transport-specific server connection identifier.</param>
     void BeginJoin(ITransport transport, ulong connectionId);
 
-    /// <summary>Applies one command, snapshot or synchronization message received from the server.</summary>
+    /// <summary>Applies one command, snapshot, synchronization or step update message from the server.</summary>
     /// <param name="message">The encoded server message.</param>
     /// <returns>The applied command result or synchronization processing result.</returns>
     CommandResult Receive(ReadOnlySpan<byte> message);
@@ -58,6 +64,9 @@ public sealed class SessionClient : ISessionClient
 
     /// <inheritdoc />
     public bool IsReady => State == SessionClientState.Ready;
+
+    /// <inheritdoc />
+    public event Action<long>? ServerStepReceived;
 
     /// <inheritdoc />
     public void BeginJoin(ITransport transport, ulong connectionId)
@@ -135,6 +144,21 @@ public sealed class SessionClient : ISessionClient
         if (CommandProtocol.TryReadOutcome(message, out CommandOutcome outcome, out ReadOnlySpan<byte> finalPayload))
         {
             return _session.ApplyOutcome(outcome, finalPayload).Result;
+        }
+
+        if (CommandProtocol.TryReadStepUpdate(message, out SessionId stepSessionId, out long serverStep))
+        {
+            if (stepSessionId != _session.Start.SessionId)
+            {
+                return CommandResult.InvalidMessage;
+            }
+
+            if (IsReady)
+            {
+                ServerStepReceived?.Invoke(serverStep);
+            }
+
+            return CommandResult.Accepted;
         }
 
         if (CommandProtocol.TryReadSyncComplete(message, out sessionId, out ulong? revision, out long currentStep))

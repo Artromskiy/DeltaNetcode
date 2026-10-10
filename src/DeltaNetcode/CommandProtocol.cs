@@ -3,7 +3,7 @@ using System.Buffers.Binary;
 
 namespace Delta.Netcode;
 
-/// <summary>Encodes and decodes command, snapshot and session synchronization frames.</summary>
+/// <summary>Encodes and decodes command, snapshot and session control frames.</summary>
 public static class CommandProtocol
 {
     private const int CommandHeaderSize = 40;
@@ -17,9 +17,11 @@ public static class CommandProtocol
     private const byte SyncRequestKind = 5;
     private const byte SyncStatusKind = 6;
     private const byte SyncCompleteKind = 7;
+    private const byte StepUpdateKind = 8;
     private const int SyncRequestSize = 1 + 8 + 8 + 1 + 8 + 8 + 8;
     private const int SyncStatusSize = 1 + 1 + 8 + 8;
     private const int SyncCompleteSize = 1 + 8 + 1 + 8 + 8;
+    private const int StepUpdateSize = 1 + 8 + 8;
 
     /// <summary>Encodes a request to join or resume an authenticated session connection.</summary>
     /// <param name="request">The requested session, protocol and client cursor.</param>
@@ -156,6 +158,38 @@ public static class CommandProtocol
         sessionId = new SessionId(BinaryPrimitives.ReadUInt64LittleEndian(message[1..]));
         journalRevision = message[9] == 0 ? null : BinaryPrimitives.ReadUInt64LittleEndian(message[10..]);
         currentStep = BinaryPrimitives.ReadInt64LittleEndian(message[18..]);
+        return true;
+    }
+
+    /// <summary>Encodes the server's current session step as a control frame.</summary>
+    /// <param name="sessionId">The session whose current step is being announced.</param>
+    /// <param name="currentStep">The last authoritative simulation step applied by the server.</param>
+    /// <returns>A newly allocated step update frame.</returns>
+    public static byte[] EncodeStepUpdate(SessionId sessionId, long currentStep)
+    {
+        byte[] message = new byte[StepUpdateSize];
+        message[0] = StepUpdateKind;
+        BinaryPrimitives.WriteUInt64LittleEndian(message.AsSpan(1), sessionId.Value);
+        BinaryPrimitives.WriteInt64LittleEndian(message.AsSpan(9), currentStep);
+        return message;
+    }
+
+    /// <summary>Reads a server step update control frame.</summary>
+    /// <param name="message">The encoded message to inspect.</param>
+    /// <param name="sessionId">Receives the session identity associated with the update.</param>
+    /// <param name="currentStep">Receives the last authoritative step applied by the server.</param>
+    /// <returns><see langword="true"/> if the message is a valid step update frame.</returns>
+    public static bool TryReadStepUpdate(ReadOnlySpan<byte> message, out SessionId sessionId, out long currentStep)
+    {
+        if (message.Length != StepUpdateSize || message[0] != StepUpdateKind)
+        {
+            sessionId = default;
+            currentStep = default;
+            return false;
+        }
+
+        sessionId = new SessionId(BinaryPrimitives.ReadUInt64LittleEndian(message[1..]));
+        currentStep = BinaryPrimitives.ReadInt64LittleEndian(message[9..]);
         return true;
     }
 
